@@ -503,9 +503,73 @@ validator.validate_permissions(token, SASPermission.WRITE)
 **Tests:** 42 unit tests, 99% coverage
 **Documentation:** `docs/implementation/STORY-GATEWAY-003.md`
 
+---
+
+#### 2.4 Protocol Router (`localzure/gateway/protocol_router.py`) ✅ IMPLEMENTED
+
+**Responsibility:** Route different protocol types (HTTP, WebSocket, AMQP) to appropriate service handlers.
+
+**Key Features:**
+- Protocol detection from headers and raw connection data
+- Support for HTTP/1.1, HTTP/2, WebSocket, and AMQP 1.0
+- Handler registration and routing per protocol
+- Stateful connection management for WebSocket and AMQP
+- Protocol-specific error formatting
+- Header and metadata preservation
+
+**Supported Protocols:**
+```python
+class ProtocolType(str, Enum):
+    HTTP = "http"          # HTTP/1.1 requests
+    HTTP2 = "http2"        # HTTP/2 requests
+    WEBSOCKET = "websocket"  # WebSocket upgrades
+    AMQP = "amqp"          # AMQP 1.0 connections
+    UNKNOWN = "unknown"    # Unrecognized
+```
+
+**Protocol Detection:**
+- **HTTP:** Standard HTTP headers
+- **HTTP/2:** `HTTP2-Settings` header present
+- **WebSocket:** `Upgrade: websocket` + `Connection: Upgrade`
+- **AMQP:** Connection preface `AMQP\x00\x01\x00\x00`
+
+**API:**
+```python
+router = ProtocolRouter()
+
+# Register handlers
+router.register_handler(ProtocolType.HTTP, http_handler)
+router.register_handler(ProtocolType.WEBSOCKET, ws_handler)
+router.register_handler(ProtocolType.AMQP, amqp_handler)
+
+# Route request
+result = await router.route_request(
+    protocol=ProtocolType.HTTP,
+    headers={"Host": "example.com"},
+    metadata={"source_ip": "127.0.0.1"}
+)
+
+# Connection tracking (stateful protocols)
+state = router.create_connection(ProtocolType.WEBSOCKET)
+count = router.active_connections(ProtocolType.WEBSOCKET)
+router.close_connection(state.connection_id)
+```
+
+**Error Handling:**
+```python
+# Protocol-specific error formats
+HTTP: {"error": {"code": 404, "message": "...", "protocol": "http"}}
+WebSocket: {"close_code": 1008, "close_reason": "..."}
+AMQP: {"condition": "amqp:internal-error", "description": "..."}
+```
+
+**Status:** ✅ Complete (STORY-GATEWAY-004)
+**Tests:** 50 unit tests, 100% coverage
+**Documentation:** `docs/implementation/STORY-GATEWAY-004.md`
+
 **Pending Components:**
 
-#### 2.4 Request Middleware (PLANNED)
+#### 2.5 Request Middleware (PLANNED)
 
 **Responsibility:** Intercept and rewrite incoming requests using HostnameMapper.
 
@@ -515,7 +579,7 @@ validator.validate_permissions(token, SASPermission.WRITE)
 - X-Original-Host header injection
 - Request/response logging
 
-#### 2.5 Authentication & Authorization (PLANNED)
+#### 2.6 Authentication & Authorization (PLANNED)
 
 **Responsibility:** Orchestrate all authentication mechanisms.
 
@@ -734,8 +798,8 @@ All logs automatically redact:
 ## Testing Strategy
 
 ### Unit Tests ✅
-- **314 tests** covering core runtime and gateway components
-- **91% code coverage** achieved
+- **364 tests** covering core runtime and gateway components
+- **92% code coverage** achieved
 - Fast execution (<7s full suite)
 - Isolated test fixtures
 
@@ -750,6 +814,7 @@ All logs automatically redact:
 - `hostname_mapper.py`: 99% coverage (41 tests)
 - `canonicalizer.py`: 100% coverage (38 tests)
 - `sas_validator.py`: 99% coverage (42 tests)
+- `protocol_router.py`: 100% coverage (50 tests)
 
 ### Integration Tests (PLANNED)
 - Service-to-service communication

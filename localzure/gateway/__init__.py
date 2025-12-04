@@ -1,7 +1,8 @@
 """Gateway module for LocalZure.
 
 This module provides URL rewriting, hostname mapping, request routing,
-and authentication validation for Azure SDK traffic to local service endpoints.
+authentication validation, and protocol routing for Azure SDK traffic
+to local service endpoints.
 """
 
 from localzure.gateway.hostname_mapper import (
@@ -25,6 +26,15 @@ from localzure.gateway.sas_validator import (
     SASValidationError,
     get_permission_for_method,
 )
+from localzure.gateway.protocol_router import (
+    ProtocolRouter,
+    ProtocolType,
+    ProtocolError,
+    ProtocolDetector,
+    ProtocolContext,
+    ConnectionState,
+    format_protocol_error,
+)
 
 __all__ = [
     "HostnameMapper",
@@ -42,4 +52,11 @@ __all__ = [
     "SASService",
     "SASValidationError",
     "get_permission_for_method",
+    "ProtocolRouter",
+    "ProtocolType",
+    "ProtocolError",
+    "ProtocolDetector",
+    "ProtocolContext",
+    "ConnectionState",
+    "format_protocol_error",
 ]

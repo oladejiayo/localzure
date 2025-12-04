@@ -640,9 +640,85 @@ test_mode:
 **Tests:** 44 unit tests, 97% coverage
 **Documentation:** `docs/implementation/STORY-GATEWAY-005.md`
 
+#### 2.6 Error Formatter (`localzure/gateway/error_formatter.py`) ✅ IMPLEMENTED
+
+**Responsibility:** Format error responses matching Azure's structure for SDK compatibility.
+
+**Features:**
+- **Error Formats:**
+  - XML for Storage services (Blob, Queue, Table, File)
+  - JSON for other services (Service Bus, Key Vault, Cosmos DB)
+  - Content negotiation based on Accept header
+
+- **Error Code Mappings:**
+  - 30+ common Azure error codes mapped to HTTP status
+  - Categories: Authentication (401), Authorization (403), Not Found (404)
+  - Bad Request (400), Conflict (409), Rate Limit (429), Server Errors (500+)
+
+- **Headers:**
+  - `x-ms-request-id` - Request tracking ID (UUID or timestamp format)
+  - `x-ms-error-code` - Azure error code
+  - `Content-Type` - application/xml or application/json
+  - `Date` - HTTP date format
+
+- **Service-Specific Factories:**
+  ```python
+  create_storage_error()      # XML default, JSON optional
+  create_service_bus_error()  # JSON
+  create_key_vault_error()    # JSON
+  create_cosmos_db_error()    # JSON
+  create_generic_error()      # Custom status codes
+  ```
+
+**Error Format Examples:**
+```xml
+<!-- Storage (XML) -->
+<?xml version="1.0" encoding="utf-8"?>
+<Error>
+  <Code>BlobNotFound</Code>
+  <Message>The specified blob does not exist.</Message>
+</Error>
+```
+
+```json
+// Other services (JSON)
+{
+  "error": {
+    "code": "ResourceNotFound",
+    "message": "The specified resource does not exist."
+  }
+}
+```
+
+**Usage:**
+```python
+# Storage error (defaults to XML)
+error = create_storage_error(
+    "BlobNotFound",
+    "The specified blob does not exist."
+)
+
+# Storage error with JSON (Accept header)
+error = create_storage_error(
+    "BlobNotFound",
+    "Message",
+    accept_header="application/json"
+)
+
+# Service Bus error (JSON)
+error = create_service_bus_error(
+    "QueueNotFound",
+    "The specified queue does not exist."
+)
+```
+
+**Status:** ✅ Complete (STORY-GATEWAY-006)
+**Tests:** 55 unit tests, 100% coverage
+**Documentation:** `docs/implementation/STORY-GATEWAY-006.md`
+
 **Pending Components:**
 
-#### 2.6 Request Middleware (PLANNED)
+#### 2.7 Request Middleware (PLANNED)
 
 **Responsibility:** Intercept and rewrite incoming requests using HostnameMapper.
 
@@ -652,7 +728,7 @@ test_mode:
 - X-Original-Host header injection
 - Request/response logging
 
-#### 2.6 Authentication & Authorization (PLANNED)
+#### 2.8 Authentication & Authorization (PLANNED)
 
 **Responsibility:** Orchestrate all authentication mechanisms.
 
@@ -871,7 +947,7 @@ All logs automatically redact:
 ## Testing Strategy
 
 ### Unit Tests ✅
-- **408 tests** covering core runtime and gateway components
+- **463 tests** covering core runtime and gateway components
 - **93% code coverage** achieved
 - Fast execution (<7s full suite)
 - Isolated test fixtures
@@ -889,6 +965,7 @@ All logs automatically redact:
 - `sas_validator.py`: 99% coverage (42 tests)
 - `protocol_router.py`: 100% coverage (50 tests)
 - `retry_simulator.py`: 97% coverage (44 tests)
+- `error_formatter.py`: 100% coverage (55 tests)
 
 ### Integration Tests (PLANNED)
 - Service-to-service communication

@@ -432,9 +432,80 @@ valid = canonicalizer.validate_signature(..., provided_signature=signature)
 **Tests:** 38 unit tests, 100% coverage
 **Documentation:** `docs/implementation/STORY-GATEWAY-002.md`
 
+---
+
+#### 2.3 SAS Token Validator (`localzure/gateway/sas_validator.py`) ✅ IMPLEMENTED
+
+**Responsibility:** Validate Shared Access Signature (SAS) tokens for Azure Storage services.
+
+**Key Features:**
+- Parse SAS tokens from URL query parameters
+- HMAC-SHA256 signature validation using account keys
+- Time-based validation (expiry and start time)
+- Permission validation (rwdlacup flags)
+- Resource type validation (service, container, object)
+- Service type validation (blob, queue, table, file)
+- Azure-compatible error codes
+
+**SAS Token Parameters:**
+```
+sv  - Signed version
+ss  - Signed services (bqtf)
+srt - Signed resource types (sco)
+sp  - Signed permissions (rwdlacup)
+se  - Signed expiry (ISO 8601)
+st  - Signed start (ISO 8601, optional)
+sig - Signature (HMAC-SHA256)
+spr - Signed protocol (optional)
+sip - Signed IP (optional)
+```
+
+**String-to-Sign Format (Account SAS):**
+```
+accountname\n
+signedpermissions\n
+signedservice\n
+signedresourcetype\n
+signedstart\n
+signedexpiry\n
+signedIP\n
+signedProtocol\n
+signedversion
+```
+
+**API:**
+```python
+validator = SASValidator(account_name="myaccount", account_key="base64-key")
+
+# Complete validation
+token = validator.validate(
+    url="https://myaccount.blob.core.windows.net/container?sv=2021-06-08&...",
+    required_permission=SASPermission.READ,
+    required_resource_type=SASResourceType.OBJECT,
+    required_service=SASService.BLOB
+)
+
+# Granular validation
+token = validator.parse_sas_token(url)
+validator.validate_signature(token, url)
+validator.validate_expiry(token)
+validator.validate_permissions(token, SASPermission.WRITE)
+```
+
+**Error Codes:**
+- `AuthenticationFailed` - Signature mismatch, expired, not yet valid
+- `InvalidQueryParameterValue` - Missing/malformed parameters
+- `AuthorizationPermissionMismatch` - Insufficient permissions
+- `AuthorizationResourceTypeMismatch` - Resource type not allowed
+- `AuthorizationServiceMismatch` - Service not allowed
+
+**Status:** ✅ Complete (STORY-GATEWAY-003)
+**Tests:** 42 unit tests, 99% coverage
+**Documentation:** `docs/implementation/STORY-GATEWAY-003.md`
+
 **Pending Components:**
 
-#### 2.3 Request Middleware (PLANNED)
+#### 2.4 Request Middleware (PLANNED)
 
 **Responsibility:** Intercept and rewrite incoming requests using HostnameMapper.
 
@@ -444,13 +515,13 @@ valid = canonicalizer.validate_signature(..., provided_signature=signature)
 - X-Original-Host header injection
 - Request/response logging
 
-#### 2.4 Authentication & Authorization (PLANNED)
+#### 2.5 Authentication & Authorization (PLANNED)
 
-**Responsibility:** Validate Azure authentication mechanisms locally.
+**Responsibility:** Orchestrate all authentication mechanisms.
 
 **Planned Features:**
-- SharedKey signature validation
-- SAS token validation
+- SharedKey authentication (using RequestCanonicalizer)
+- SAS token authentication (using SASValidator)
 - OAuth 2.0 / Azure AD mock
 - CORS handling
 - Rate limiting
@@ -663,9 +734,9 @@ All logs automatically redact:
 ## Testing Strategy
 
 ### Unit Tests ✅
-- **272 tests** covering core runtime and gateway components
+- **314 tests** covering core runtime and gateway components
 - **91% code coverage** achieved
-- Fast execution (<6s full suite)
+- Fast execution (<7s full suite)
 - Isolated test fixtures
 
 **Test Coverage by Module:**
@@ -678,6 +749,7 @@ All logs automatically redact:
 - `lifecycle.py`: 99% coverage (28 tests)
 - `hostname_mapper.py`: 99% coverage (41 tests)
 - `canonicalizer.py`: 100% coverage (38 tests)
+- `sas_validator.py`: 99% coverage (42 tests)
 
 ### Integration Tests (PLANNED)
 - Service-to-service communication

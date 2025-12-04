@@ -1,7 +1,7 @@
 """Gateway module for LocalZure.
 
-This module provides URL rewriting, hostname mapping, and request routing
-for Azure SDK traffic to local service endpoints.
+This module provides URL rewriting, hostname mapping, request routing,
+and authentication validation for Azure SDK traffic to local service endpoints.
 """
 
 from localzure.gateway.hostname_mapper import (
@@ -16,6 +16,15 @@ from localzure.gateway.canonicalizer import (
     ServiceType,
     parse_authorization_header,
 )
+from localzure.gateway.sas_validator import (
+    SASValidator,
+    SASToken,
+    SASPermission,
+    SASResourceType,
+    SASService,
+    SASValidationError,
+    get_permission_for_method,
+)
 
 __all__ = [
     "HostnameMapper",
@@ -26,4 +35,11 @@ __all__ = [
     "CanonicalVersion",
     "ServiceType",
     "parse_authorization_header",
+    "SASValidator",
+    "SASToken",
+    "SASPermission",
+    "SASResourceType",
+    "SASService",
+    "SASValidationError",
+    "get_permission_for_method",
 ]

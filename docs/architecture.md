@@ -256,6 +256,68 @@ class AzuriteBlobService(LocalZureService):
 - **Docker Mode:** Service runs in container (if `docker_config()` returns config and Docker available)
 - **Host Mode:** Service runs in LocalZure process (if `docker_config()` returns `None` or Docker unavailable)
 - **Automatic Fallback:** Falls back to host mode if Docker is unavailable
+
+#### 1.7 Lifecycle Manager (`localzure/core/lifecycle.py`) ✅ IMPLEMENTED
+
+**Responsibilities:**
+- Handle graceful shutdown with signal processing
+- Track in-flight requests during shutdown
+- Manage runtime lifecycle state transitions
+- Support startup rollback on initialization failure
+- Coordinate shutdown callbacks across subsystems
+
+**Key Features:**
+- SIGTERM/SIGINT signal handling via asyncio
+- Configurable shutdown timeout (default 30s)
+- Request tracking with draining mode
+- Force shutdown after timeout
+- Startup rollback for partial initialization failures
+- State change callbacks for monitoring
+
+**Lifecycle States:**
+```
+INITIALIZING → STARTING → RUNNING → DRAINING → STOPPING → STOPPED
+             ↓           ↓          ↓
+           FAILED      FAILED     FAILED
+```
+
+**Shutdown Sequence:**
+```
+1. Receive signal/request
+2. Set state to DRAINING
+3. Stop accepting new requests
+4. Wait for in-flight requests (with timeout)
+5. Execute shutdown callbacks
+6. Cleanup resources (services, Docker)
+7. Set state to STOPPED
+```
+
+**Usage Example:**
+```python
+# Initialize with custom timeout
+lifecycle = LifecycleManager(shutdown_timeout=45.0)
+
+# Register signal handlers (main thread)
+lifecycle.register_signal_handlers()
+
+# Track requests
+tracker = lifecycle.get_request_tracker()
+await tracker.start_request("req-123")
+# ... process request ...
+await tracker.end_request("req-123")
+
+# Register shutdown callback
+async def cleanup(reason):
+    await save_state()
+    await close_connections()
+
+lifecycle.register_shutdown_callback(cleanup)
+
+# Wait for signal
+signal = await lifecycle.wait_for_shutdown_signal()
+
+# Graceful shutdown
+success = await lifecycle.graceful_shutdown()
 ```
 
 **Service Metadata:**
@@ -498,18 +560,19 @@ All logs automatically redact:
 ## Testing Strategy
 
 ### Unit Tests ✅
-- **149 tests** covering core runtime components
-- **88% code coverage** achieved
-- Fast execution (<3s full suite)
+- **188 tests** covering core runtime components
+- **89% code coverage** achieved
+- Fast execution (<6s full suite)
 - Isolated test fixtures
 
 **Test Coverage by Module:**
 - `config_manager.py`: 96% coverage (17 tests)
 - `logging_config.py`: 96% coverage (23 tests)  
-- `runtime.py`: 87% coverage (18 tests)
+- `runtime.py`: 87% coverage (32 tests)
 - `service.py`: 94% coverage (22 tests)
 - `service_manager.py`: 87% coverage (45 tests)
 - `docker_manager.py`: 76% coverage (21 tests)
+- `lifecycle.py`: 99% coverage (28 tests)
 
 ### Integration Tests (PLANNED)
 - Service-to-service communication

@@ -6,6 +6,7 @@ from .logging_config import setup_logging, get_logger
 from .service import LocalZureService, ServiceState, ServiceMetadata, ServiceRoute
 from .service_manager import ServiceManager, ServiceDependencyError, ServiceStateError
 from .docker_manager import DockerManager, DockerConfig, ContainerState
+from .lifecycle import LifecycleManager, LifecycleState, ShutdownReason, RequestTracker
 
 __all__ = [
     "LocalZureRuntime",
@@ -22,5 +23,9 @@ __all__ = [
     "ServiceStateError",
     "DockerManager",
     "DockerConfig",
-    "ContainerState"
+    "ContainerState",
+    "LifecycleManager",
+    "LifecycleState",
+    "ShutdownReason",
+    "RequestTracker"
 ]

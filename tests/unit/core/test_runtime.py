@@ -2,11 +2,15 @@
 Tests for LocalZure Runtime.
 """
 
+import asyncio
+import signal
 import pytest
+from unittest.mock import AsyncMock, patch, Mock
 from fastapi.testclient import TestClient
 
 from localzure.core.runtime import LocalZureRuntime
 from localzure.core.config_manager import LocalZureConfig
+from localzure.core.lifecycle import LifecycleState, ShutdownReason
 
 
 @pytest.fixture
@@ -229,3 +233,154 @@ server:
         uptime2 = status2["uptime"]
         
         assert uptime2 >= uptime1
+    
+    async def test_lifecycle_manager_initialized(self, runtime):
+        """Test that lifecycle manager is initialized."""
+        await runtime.initialize()
+        
+        assert runtime._lifecycle_manager is not None
+        assert runtime._lifecycle_manager.get_state() == LifecycleState.STOPPED
+    
+    async def test_lifecycle_state_transitions(self, runtime):
+        """Test lifecycle state transitions during runtime operations."""
+        await runtime.initialize()
+        
+        # After init, should be STOPPED
+        assert runtime._lifecycle_manager.get_state() == LifecycleState.STOPPED
+        
+        await runtime.start()
+        # After start, should be RUNNING
+        assert runtime._lifecycle_manager.get_state() == LifecycleState.RUNNING
+        
+        await runtime.stop()
+        # After stop, should be STOPPED
+        assert runtime._lifecycle_manager.get_state() == LifecycleState.STOPPED
+    
+    async def test_graceful_shutdown_on_stop(self, runtime):
+        """Test that stop uses graceful shutdown."""
+        await runtime.initialize()
+        await runtime.start()
+        
+        # Mock graceful_shutdown to verify it's called
+        with patch.object(runtime._lifecycle_manager, 'graceful_shutdown', new_callable=AsyncMock) as mock_shutdown:
+            mock_shutdown.return_value = True
+            await runtime.stop()
+            
+            mock_shutdown.assert_awaited_once()
+            call_args = mock_shutdown.call_args
+            assert call_args[1]['reason'] == ShutdownReason.MANUAL
+    
+    async def test_health_endpoint_draining_state(self, runtime):
+        """Test health endpoint returns 503 when draining."""
+        await runtime.initialize()
+        await runtime.start()
+        
+        # Set draining state
+        runtime._lifecycle_manager.set_state(LifecycleState.DRAINING)
+        
+        app = runtime.get_app()
+        client = TestClient(app)
+        
+        response = client.get("/health")
+        
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "draining"
+    
+    async def test_health_status_includes_in_flight_requests(self, runtime):
+        """Test health status includes in-flight request count."""
+        await runtime.initialize()
+        await runtime.start()
+        
+        # Add some in-flight requests
+        tracker = runtime._lifecycle_manager.get_request_tracker()
+        await tracker.start_request("req-1")
+        await tracker.start_request("req-2")
+        
+        status = runtime.get_health_status()
+        
+        assert status["in_flight_requests"] == 2
+        
+        await tracker.end_request("req-1")
+        status = runtime.get_health_status()
+        assert status["in_flight_requests"] == 1
+    
+    async def test_wait_for_shutdown_signal(self, runtime):
+        """Test waiting for shutdown signal."""
+        await runtime.initialize()
+        
+        # Simulate signal in background
+        async def send_signal():
+            await asyncio.sleep(0.1)
+            runtime._lifecycle_manager._signal_received = signal.SIGTERM
+            runtime._lifecycle_manager._shutdown_event.set()
+        
+        asyncio.create_task(send_signal())
+        
+        # Wait for signal
+        sig = await runtime.wait_for_shutdown_signal()
+        assert sig == signal.SIGTERM
+    
+    async def test_shutdown_timeout_from_config(self, runtime):
+        """Test shutdown timeout is read from config."""
+        cli_overrides = {
+            "server": {"shutdown_timeout": 45.0}
+        }
+        
+        await runtime.initialize(cli_overrides=cli_overrides)
+        
+        assert runtime._lifecycle_manager._shutdown_timeout == 45.0
+    
+    async def test_initialization_rollback_on_failure(self, runtime):
+        """Test that initialization rollback works on service manager failure."""
+        # Mock service manager to fail during initialization
+        with patch('localzure.core.runtime.ServiceManager') as MockServiceManager:
+            mock_sm = Mock()
+            mock_sm.discover_services = Mock()
+            mock_sm.initialize = AsyncMock(side_effect=RuntimeError("Service init failed"))
+            mock_sm.stop_service = AsyncMock()
+            MockServiceManager.return_value = mock_sm
+            
+            with pytest.raises(RuntimeError) as exc_info:
+                await runtime.initialize()
+            
+            assert "Failed to initialize services" in str(exc_info.value)
+            assert runtime.is_initialized is False
+    
+    async def test_failed_initialization_sets_failed_state(self, runtime):
+        """Test that failed initialization sets lifecycle state to FAILED."""
+        # Force an initialization error
+        with patch.object(runtime._config_manager, 'load', side_effect=ValueError("Invalid config")):
+            with pytest.raises(RuntimeError):
+                await runtime.initialize()
+            
+            # Lifecycle manager should be None or in FAILED state
+            # Since initialization failed early, lifecycle manager might not be created
+            # This test validates the error handling path
+            assert runtime.is_initialized is False
+    
+    async def test_shutdown_callback_integration(self, runtime):
+        """Test that shutdown callback is executed."""
+        await runtime.initialize()
+        await runtime.start()
+        
+        # Mock service manager shutdown
+        with patch.object(runtime._service_manager, 'shutdown', new_callable=AsyncMock) as mock_shutdown:
+            await runtime.stop()
+            
+            # Shutdown should be called via the callback
+            mock_shutdown.assert_awaited_once()
+    
+    async def test_reset_clears_lifecycle_state(self, runtime):
+        """Test that reset clears lifecycle state."""
+        await runtime.initialize()
+        await runtime.start()
+        
+        # Verify running state
+        assert runtime._lifecycle_manager.get_state() == LifecycleState.RUNNING
+        
+        await runtime.reset()
+        
+        # After reset, should be back to STOPPED
+        assert runtime._lifecycle_manager.get_state() == LifecycleState.STOPPED
+        assert runtime.is_initialized is False

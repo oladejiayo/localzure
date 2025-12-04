@@ -72,6 +72,11 @@ class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
     workers: int = 1
+    shutdown_timeout: float = Field(
+        default=30.0,
+        ge=0.0,
+        description="Graceful shutdown timeout in seconds"
+    )
 
 
 class LocalZureConfig(BaseModel):

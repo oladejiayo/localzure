@@ -385,9 +385,56 @@ class GatewayConfig(BaseModel):
 **Tests:** 41 unit tests, 99% coverage
 **Documentation:** `docs/implementation/STORY-GATEWAY-001.md`
 
+#### 2.2 Request Canonicalizer (`localzure/gateway/canonicalizer.py`) ✅ IMPLEMENTED
+
+**Responsibility:** Canonicalize HTTP requests for Azure SharedKey authentication.
+
+**Key Features:**
+- Multi-version canonicalization support:
+  - 2009-09-19: Original Azure Storage version
+  - 2015-04-05: Updated with query parameters
+  - 2019-02-02: Latest version with full header support
+- Multi-service support: Blob, Queue, Table, File storage
+- Canonical headers building (sorted x-ms-* headers)
+- Canonical resource building (account name, path, query params)
+- HMAC-SHA256 signature computation
+- Signature validation for SharedKey auth
+- Authorization header parsing
+
+**Canonicalization Algorithm:**
+```
+VERB\n
+Content-Encoding\n
+Content-Length\n
+Content-MD5\n
+Content-Type\n
+Date\n
+[Other standard headers...]\n
+CanonicalizedHeaders\n
+CanonicalizedResource
+```
+
+**API:**
+```python
+canonicalizer = RequestCanonicalizer(version=CanonicalVersion.VERSION_2019_02_02)
+result = canonicalizer.canonicalize(
+    method="GET",
+    url="https://myaccount.blob.core.windows.net/container/blob",
+    headers={"x-ms-version": "2021-08-06", "x-ms-date": "..."},
+    account_name="myaccount",
+    service_type=ServiceType.BLOB
+)
+signature = canonicalizer.compute_signature(result.string_to_sign, account_key)
+valid = canonicalizer.validate_signature(..., provided_signature=signature)
+```
+
+**Status:** ✅ Complete (STORY-GATEWAY-002)
+**Tests:** 38 unit tests, 100% coverage
+**Documentation:** `docs/implementation/STORY-GATEWAY-002.md`
+
 **Pending Components:**
 
-#### 2.2 Request Middleware (PLANNED)
+#### 2.3 Request Middleware (PLANNED)
 
 **Responsibility:** Intercept and rewrite incoming requests using HostnameMapper.
 
@@ -397,7 +444,7 @@ class GatewayConfig(BaseModel):
 - X-Original-Host header injection
 - Request/response logging
 
-#### 2.3 Authentication & Authorization (PLANNED)
+#### 2.4 Authentication & Authorization (PLANNED)
 
 **Responsibility:** Validate Azure authentication mechanisms locally.
 
@@ -616,8 +663,8 @@ All logs automatically redact:
 ## Testing Strategy
 
 ### Unit Tests ✅
-- **234 tests** covering core runtime and gateway components
-- **90% code coverage** achieved
+- **272 tests** covering core runtime and gateway components
+- **91% code coverage** achieved
 - Fast execution (<6s full suite)
 - Isolated test fixtures
 
@@ -630,6 +677,7 @@ All logs automatically redact:
 - `docker_manager.py`: 76% coverage (21 tests)
 - `lifecycle.py`: 99% coverage (28 tests)
 - `hostname_mapper.py`: 99% coverage (41 tests)
+- `canonicalizer.py`: 100% coverage (38 tests)
 
 ### Integration Tests (PLANNED)
 - Service-to-service communication

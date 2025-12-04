@@ -9,9 +9,21 @@ from localzure.gateway.hostname_mapper import (
     MappingResult,
     HostnamePattern,
 )
+from localzure.gateway.canonicalizer import (
+    RequestCanonicalizer,
+    CanonicalizedRequest,
+    CanonicalVersion,
+    ServiceType,
+    parse_authorization_header,
+)
 
 __all__ = [
     "HostnameMapper",
     "MappingResult",
     "HostnamePattern",
+    "RequestCanonicalizer",
+    "CanonicalizedRequest",
+    "CanonicalVersion",
+    "ServiceType",
+    "parse_authorization_header",
 ]

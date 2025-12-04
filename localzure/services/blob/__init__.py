@@ -13,4 +13,9 @@ __all__ = [
     "Container",
     "ContainerMetadata",
     "ContainerProperties",
+    "Blob",
+    "BlobProperties",
+    "BlobType",
+    "BlobTier",
+    "Block",
 ]

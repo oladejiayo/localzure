@@ -1,0 +1,45 @@
+[MAIN]
+# Use multiple processes to speed up Pylint
+jobs=1
+
+# Pickle collected data for later comparisons
+persistent=yes
+
+[MESSAGES CONTROL]
+# Disable the message, report, category or checker with the given id(s)
+disable=
+    C0114,  # missing-module-docstring
+    C0115,  # missing-class-docstring
+    C0116,  # missing-function-docstring
+    C0301,  # line-too-long (we allow some flexibility)
+    C0303,  # trailing-whitespace (handled by auto-formatters)
+    R0913,  # too-many-arguments
+    R0902,  # too-many-instance-attributes
+    R0904,  # too-many-public-methods
+    R1705,  # no-else-return
+    W0511,  # fixme
+    W0611,  # unused-import (false positives, imports used by __all__)
+    W1203,  # logging-fstring-interpolation (we use f-strings intentionally)
+    W0718,  # broad-exception-caught (intentional in many places)
+    E1101,  # no-member (false positives with Pydantic)
+
+[FORMAT]
+# Maximum number of characters on a single line
+max-line-length=100
+
+# Maximum number of lines in a module
+max-module-lines=1000
+
+[BASIC]
+# Good variable names
+good-names=i,j,k,ex,_,id,db,e,f,s,v
+
+[DESIGN]
+# Maximum number of arguments for function / method
+max-args=10
+
+# Maximum number of attributes for a class
+max-attributes=15
+
+# Maximum number of public methods for a class
+max-public-methods=30

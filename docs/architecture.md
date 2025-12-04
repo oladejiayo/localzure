@@ -567,9 +567,82 @@ AMQP: {"condition": "amqp:internal-error", "description": "..."}
 **Tests:** 50 unit tests, 100% coverage
 **Documentation:** `docs/implementation/STORY-GATEWAY-004.md`
 
+#### 2.5 Retry Simulator (`localzure/gateway/retry_simulator.py`) ✅ IMPLEMENTED
+
+**Responsibility:** Simulate Azure retry behavior and backoff patterns for testing application retry logic.
+
+**Features:**
+- **Test Mode Configuration:**
+  - Global and per-service configuration
+  - Configurable failure rate (0.0 to 1.0)
+  - Multiple error codes (429, 500, 502, 503, 504)
+  - Optional duration for time-bounded injection
+  - Disabled by default for safety
+
+- **Failure Patterns:**
+  ```python
+  class FailurePattern(str, Enum):
+      RANDOM = "random"        # Random failures based on rate
+      SEQUENTIAL = "sequential" # Every Nth request fails
+      BURST = "burst"          # Failures in bursts
+  ```
+
+- **Retry-After Formats:**
+  - Seconds: `"10"` (delay-seconds format)
+  - HTTP-Date: `"Fri, 31 Dec 2025 23:59:59 GMT"`
+  - x-ms-retry-after-ms header support
+
+- **Deterministic Injection:**
+  - Seed-based randomness for reproducible tests
+  - Request ID hashing for consistent behavior
+
+**Usage:**
+```python
+# Configure test mode
+config = TestModeConfig(
+    enabled=True,
+    failure_rate=0.3,
+    error_codes=[429, 503],
+    retry_after=10,
+    retry_after_format=RetryAfterFormat.SECONDS,
+    pattern=FailurePattern.RANDOM
+)
+
+# Create simulator
+simulator = RetrySimulator(global_config=config)
+
+# Register service-specific config
+storage_config = TestModeConfig(enabled=True, failure_rate=0.5)
+simulator.register_service_config("storage", storage_config)
+
+# Check if request should fail
+result = simulator.check_failure(service_name="storage")
+if result.should_fail:
+    response = create_error_response(result)
+    # Returns 429/503 with Retry-After header
+```
+
+**Configuration:**
+```yaml
+test_mode:
+  enabled: true
+  failure_rate: 0.2
+  error_codes: [429, 503]
+  retry_after: 15
+  retry_after_format: http_date
+  pattern: burst
+  burst_size: 3
+  burst_interval: 10
+  duration: 300
+```
+
+**Status:** ✅ Complete (STORY-GATEWAY-005)
+**Tests:** 44 unit tests, 97% coverage
+**Documentation:** `docs/implementation/STORY-GATEWAY-005.md`
+
 **Pending Components:**
 
-#### 2.5 Request Middleware (PLANNED)
+#### 2.6 Request Middleware (PLANNED)
 
 **Responsibility:** Intercept and rewrite incoming requests using HostnameMapper.
 
@@ -798,8 +871,8 @@ All logs automatically redact:
 ## Testing Strategy
 
 ### Unit Tests ✅
-- **364 tests** covering core runtime and gateway components
-- **92% code coverage** achieved
+- **408 tests** covering core runtime and gateway components
+- **93% code coverage** achieved
 - Fast execution (<7s full suite)
 - Isolated test fixtures
 
@@ -815,6 +888,7 @@ All logs automatically redact:
 - `canonicalizer.py`: 100% coverage (38 tests)
 - `sas_validator.py`: 99% coverage (42 tests)
 - `protocol_router.py`: 100% coverage (50 tests)
+- `retry_simulator.py`: 97% coverage (44 tests)
 
 ### Integration Tests (PLANNED)
 - Service-to-service communication

@@ -46,6 +46,7 @@ addopts = "-ra -q --strict-markers"
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+python_classes = ["Test*", "!_Test*"]
 
 [tool.coverage.run]
 source = ["localzure"]

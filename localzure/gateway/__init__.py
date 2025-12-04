@@ -35,6 +35,15 @@ from localzure.gateway.protocol_router import (
     ConnectionState,
     format_protocol_error,
 )
+from localzure.gateway.retry_simulator import (
+    RetrySimulator,
+    TestModeConfig,
+    FailurePattern,
+    RetryAfterFormat,
+    FailureInjectionResult,
+    create_error_response,
+    parse_test_mode_config,
+)
 
 __all__ = [
     "HostnameMapper",
@@ -59,4 +68,11 @@ __all__ = [
     "ProtocolContext",
     "ConnectionState",
     "format_protocol_error",
+    "RetrySimulator",
+    "TestModeConfig",
+    "FailurePattern",
+    "RetryAfterFormat",
+    "FailureInjectionResult",
+    "create_error_response",
+    "parse_test_mode_config",
 ]

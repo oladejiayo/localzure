@@ -16,7 +16,8 @@ from localzure.core.config_manager import (
     LocalZureConfig,
     LogLevel,
     StateBackendType,
-    ServiceConfig
+    ServiceConfig,
+    GatewayConfig
 )
 
 
@@ -308,3 +309,69 @@ class TestLocalZureConfig:
         # All services should be disabled by default
         for service in config.services.values():
             assert service.enabled is False
+
+
+class TestGatewayConfig:
+    """Test suite for GatewayConfig model."""
+    
+    def test_default_gateway_config(self):
+        """Test default gateway configuration values."""
+        config = GatewayConfig()
+        
+        assert config.enabled is True
+        assert config.custom_mappings == {}
+        assert config.preserve_host_header is True
+    
+    def test_custom_mappings(self):
+        """Test custom hostname mappings."""
+        config = GatewayConfig(
+            custom_mappings={
+                "custom.domain.com": "http://localhost:9000",
+                "another.example.com": "http://localhost:9001"
+            }
+        )
+        
+        assert len(config.custom_mappings) == 2
+        assert config.custom_mappings["custom.domain.com"] == "http://localhost:9000"
+        assert config.custom_mappings["another.example.com"] == "http://localhost:9001"
+    
+    def test_gateway_disabled(self):
+        """Test disabling gateway."""
+        config = GatewayConfig(enabled=False)
+        
+        assert config.enabled is False
+    
+    def test_gateway_in_localzure_config(self):
+        """Test gateway config as part of LocalZure config."""
+        config = LocalZureConfig()
+        
+        assert config.gateway is not None
+        assert config.gateway.enabled is True
+        assert isinstance(config.gateway, GatewayConfig)
+    
+    def test_load_gateway_config_from_yaml(self):
+        """Test loading gateway configuration from YAML file."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            yaml_config = {
+                "gateway": {
+                    "enabled": True,
+                    "preserve_host_header": False,
+                    "custom_mappings": {
+                        "custom.blob.example.com": "http://localhost:11000"
+                    }
+                }
+            }
+            yaml.dump(yaml_config, f)
+            config_file = f.name
+        
+        try:
+            manager = ConfigManager()
+            config = manager.load(config_file=config_file)
+            
+            assert config.gateway.enabled is True
+            assert config.gateway.preserve_host_header is False
+            assert "custom.blob.example.com" in config.gateway.custom_mappings
+            assert config.gateway.custom_mappings["custom.blob.example.com"] == "http://localhost:11000"
+        finally:
+            Path(config_file).unlink()
+

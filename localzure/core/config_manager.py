@@ -67,6 +67,19 @@ class LoggingConfig(BaseModel):
     )
 
 
+class GatewayConfig(BaseModel):
+    """API Gateway configuration."""
+    enabled: bool = True
+    custom_mappings: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Custom hostname to local endpoint mappings"
+    )
+    preserve_host_header: bool = Field(
+        default=True,
+        description="Preserve original Azure hostname in X-Original-Host header"
+    )
+
+
 class ServerConfig(BaseModel):
     """HTTP server configuration."""
     host: str = "0.0.0.0"
@@ -85,6 +98,8 @@ class LocalZureConfig(BaseModel):
     version: str = Field(default="0.1.0", description="Configuration version")
     
     server: ServerConfig = Field(default_factory=ServerConfig)
+    
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     

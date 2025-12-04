@@ -341,16 +341,72 @@ class ServiceRoute:
     handler: Any  # FastAPI route handler
 ```
 
-### 2. API Gateway Layer (PENDING)
+### 2. API Gateway Layer ⏳ IN PROGRESS
 
-**Purpose:** Route incoming requests to appropriate service emulators, handle authentication, and enforce rate limits.
+**Purpose:** Route requests, rewrite URLs, handle authentication, and manage cross-cutting concerns.
 
-**Planned Components:**
-- Request router
-- Authentication/authorization middleware
+**Implemented Components:**
+
+#### 2.1 Hostname Mapper (`localzure/gateway/hostname_mapper.py`) ✅ IMPLEMENTED
+
+**Responsibility:** Map Azure service hostnames to LocalZure endpoints and rewrite URLs.
+
+**Key Features:**
+- Regex-based hostname pattern matching
+- Support for 6 major Azure services:
+  - Blob Storage: `<account>.blob.core.windows.net` → `http://localhost:10000/<account>`
+  - Queue Storage: `<account>.queue.core.windows.net` → `http://localhost:10001/<account>`
+  - Table Storage: `<account>.table.core.windows.net` → `http://localhost:10002/<account>`
+  - Service Bus: `<namespace>.servicebus.windows.net` → `http://localhost:5672`
+  - Key Vault: `<vault>.vault.azure.net` → `http://localhost:8200/<vault>`
+  - Cosmos DB: `<account>.documents.azure.com` → `http://localhost:8081/<account>`
+- Path and query parameter preservation
+- Custom hostname mapping support via configuration
+- Original host header preservation (`X-Original-Host`)
+
+**API:**
+```python
+mapper = HostnameMapper(custom_mappings={"custom.domain.com": "http://localhost:9000"})
+result = mapper.map_url("https://myaccount.blob.core.windows.net/container/blob?sv=2021-06-08")
+# result.mapped_url = "http://localhost:10000/myaccount/container/blob?sv=2021-06-08"
+# result.original_host = "myaccount.blob.core.windows.net"
+# result.service_name = "blob"
+```
+
+**Configuration:**
+```python
+class GatewayConfig(BaseModel):
+    enabled: bool = True
+    custom_mappings: Dict[str, str] = Field(default_factory=dict)
+    preserve_host_header: bool = True
+```
+
+**Status:** ✅ Complete (STORY-GATEWAY-001)
+**Tests:** 41 unit tests, 99% coverage
+**Documentation:** `docs/implementation/STORY-GATEWAY-001.md`
+
+**Pending Components:**
+
+#### 2.2 Request Middleware (PLANNED)
+
+**Responsibility:** Intercept and rewrite incoming requests using HostnameMapper.
+
+**Planned Features:**
+- FastAPI middleware integration
+- Automatic URL rewriting for all requests
+- X-Original-Host header injection
+- Request/response logging
+
+#### 2.3 Authentication & Authorization (PLANNED)
+
+**Responsibility:** Validate Azure authentication mechanisms locally.
+
+**Planned Features:**
+- SharedKey signature validation
+- SAS token validation
+- OAuth 2.0 / Azure AD mock
 - CORS handling
 - Rate limiting
-- Request/response logging
 
 ### 3. Service Emulator Layer (PENDING)
 
@@ -560,19 +616,20 @@ All logs automatically redact:
 ## Testing Strategy
 
 ### Unit Tests ✅
-- **188 tests** covering core runtime components
-- **89% code coverage** achieved
+- **234 tests** covering core runtime and gateway components
+- **90% code coverage** achieved
 - Fast execution (<6s full suite)
 - Isolated test fixtures
 
 **Test Coverage by Module:**
-- `config_manager.py`: 96% coverage (17 tests)
+- `config_manager.py`: 96% coverage (22 tests)
 - `logging_config.py`: 96% coverage (23 tests)  
 - `runtime.py`: 87% coverage (32 tests)
 - `service.py`: 94% coverage (22 tests)
 - `service_manager.py`: 87% coverage (45 tests)
 - `docker_manager.py`: 76% coverage (21 tests)
 - `lifecycle.py`: 99% coverage (28 tests)
+- `hostname_mapper.py`: 99% coverage (41 tests)
 
 ### Integration Tests (PLANNED)
 - Service-to-service communication

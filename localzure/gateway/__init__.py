@@ -64,6 +64,46 @@ from localzure.gateway.error_formatter import (
     create_generic_error,
     ERROR_CODE_MAPPINGS,
 )
+from localzure.gateway.rate_limiter import (
+    RateLimiter,
+    RateLimitRule,
+    RateLimitScope,
+    TokenBucket,
+)
+from localzure.gateway.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerError,
+    CircuitBreakerRegistry,
+    CircuitBreakerStats,
+    CircuitState,
+)
+from localzure.gateway.tracing import (
+    TraceContext,
+    Tracer,
+    Span,
+    SpanEvent,
+    create_trace_context,
+    set_trace_context,
+    get_trace_context,
+    add_baggage,
+    get_baggage,
+    get_correlation_id,
+    get_request_id,
+)
+from localzure.gateway.metrics import (
+    MetricsCollector,
+    MetricType,
+    MetricLabels,
+    CounterMetric,
+    GaugeMetric,
+    HistogramMetric,
+    SummaryMetric,
+    get_metrics_collector,
+)
+from localzure.gateway.middleware import (
+    GatewayMiddleware,
+)
 
 __all__ = [
     "HostnameMapper",
@@ -113,4 +153,34 @@ __all__ = [
     "create_cosmos_db_error",
     "create_generic_error",
     "ERROR_CODE_MAPPINGS",
+    "RateLimiter",
+    "RateLimitRule",
+    "RateLimitScope",
+    "TokenBucket",
+    "CircuitBreaker",
+    "CircuitBreakerConfig",
+    "CircuitBreakerError",
+    "CircuitBreakerRegistry",
+    "CircuitBreakerStats",
+    "CircuitState",
+    "TraceContext",
+    "Tracer",
+    "Span",
+    "SpanEvent",
+    "create_trace_context",
+    "set_trace_context",
+    "get_trace_context",
+    "add_baggage",
+    "get_baggage",
+    "get_correlation_id",
+    "get_request_id",
+    "MetricsCollector",
+    "MetricType",
+    "MetricLabels",
+    "CounterMetric",
+    "GaugeMetric",
+    "HistogramMetric",
+    "SummaryMetric",
+    "get_metrics_collector",
+    "GatewayMiddleware",
 ]

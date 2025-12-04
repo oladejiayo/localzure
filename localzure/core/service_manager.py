@@ -2,7 +2,8 @@
 LocalZure Service Manager.
 
 Manages the lifecycle of all service emulators, including discovery, dependency
-resolution, startup, shutdown, and health monitoring.
+resolution, startup, shutdown, and health monitoring. Supports both host-mode
+and Docker container execution.
 """
 
 import asyncio
@@ -12,6 +13,7 @@ from collections import defaultdict, deque
 from importlib.metadata import entry_points
 
 from .service import LocalZureService, ServiceState, ServiceMetadata
+from .docker_manager import DockerManager, DockerConfig
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -45,19 +47,21 @@ class ServiceManager:
     Responsibilities:
     - Discover services via Python entrypoints
     - Resolve service dependencies
-    - Start/stop services in correct order
+    - Start/stop services in correct order (host or Docker)
     - Monitor service health
     - Emit events for state changes
+    - Integrate with Docker for containerized services
     """
     
     ENTRYPOINT_GROUP = "localzure.services"
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, docker_enabled: bool = False):
         """
         Initialize the service manager.
         
         Args:
             config: Configuration dictionary for services
+            docker_enabled: Whether to enable Docker integration
         """
         self._config = config or {}
         self._services: Dict[str, LocalZureService] = {}
@@ -65,6 +69,9 @@ class ServiceManager:
         self._event_listeners: List[Any] = []  # Callables that receive ServiceEvent
         self._startup_order: List[str] = []
         self._initialized = False
+        self._docker_enabled = docker_enabled
+        self._docker_manager: Optional[DockerManager] = None
+        self._docker_services: Set[str] = set()  # Services running in Docker
     
     def discover_services(self) -> None:
         """
@@ -193,7 +200,7 @@ class ServiceManager:
         """
         Initialize the service manager.
         
-        This resolves dependencies and prepares services for startup.
+        This resolves dependencies, initializes Docker (if enabled), and prepares services.
         
         Raises:
             ServiceDependencyError: If dependencies cannot be resolved
@@ -206,6 +213,16 @@ class ServiceManager:
         logger.info("Initializing service manager")
         
         try:
+            # Initialize Docker if enabled
+            if self._docker_enabled:
+                self._docker_manager = DockerManager()
+                docker_available = await self._docker_manager.initialize()
+                if docker_available:
+                    logger.info("Docker integration enabled and available")
+                else:
+                    logger.warning("Docker integration requested but Docker is not available. Services will run in host mode.")
+                    self._docker_enabled = False
+            
             # Resolve startup order
             self._startup_order = self._resolve_dependencies()
             self._initialized = True
@@ -218,7 +235,7 @@ class ServiceManager:
     
     async def start_service(self, name: str) -> None:
         """
-        Start a specific service.
+        Start a specific service (in Docker or host mode).
         
         Args:
             name: Service name
@@ -250,7 +267,29 @@ class ServiceManager:
         old_state = service.state
         
         try:
-            await service._safe_start()
+            # Check if service should run in Docker
+            docker_config = service.docker_config()
+            use_docker = (
+                self._docker_enabled 
+                and self._docker_manager 
+                and self._docker_manager.is_available()
+                and docker_config is not None
+            )
+            
+            if use_docker:
+                logger.info(f"Starting service '{name}' in Docker container")
+                success = await self._docker_manager.start_container(name, docker_config)
+                if success:
+                    self._docker_services.add(name)
+                    # Service state managed by container, mark as running
+                    service._transition_state(ServiceState.RUNNING)
+                else:
+                    raise RuntimeError(f"Failed to start Docker container for '{name}'")
+            else:
+                # Host mode
+                logger.info(f"Starting service '{name}' in host mode")
+                await service._safe_start()
+            
             self._emit_event(ServiceEvent(name, old_state, service.state))
             logger.info(f"Service '{name}' started successfully")
             
@@ -261,7 +300,7 @@ class ServiceManager:
     
     async def stop_service(self, name: str) -> None:
         """
-        Stop a specific service.
+        Stop a specific service (Docker or host mode).
         
         Args:
             name: Service name
@@ -283,7 +322,16 @@ class ServiceManager:
         old_state = service.state
         
         try:
-            await service._safe_stop()
+            # Check if service is running in Docker
+            if name in self._docker_services:
+                logger.info(f"Stopping Docker container for service '{name}'")
+                await self._docker_manager.stop_container(name)
+                self._docker_services.discard(name)
+                service._transition_state(ServiceState.STOPPED)
+            else:
+                # Host mode
+                await service._safe_stop()
+            
             self._emit_event(ServiceEvent(name, old_state, service.state))
             logger.info(f"Service '{name}' stopped successfully")
             
@@ -395,7 +443,8 @@ class ServiceManager:
             "state": service.state.value,
             "uptime": service.uptime,
             "error": str(service.error) if service.error else None,
-            "dependencies": metadata.dependencies
+            "dependencies": metadata.dependencies,
+            "execution_mode": "docker" if name in self._docker_services else "host"
         }
     
     def get_all_status(self) -> Dict[str, Dict[str, Any]]:
@@ -412,7 +461,7 @@ class ServiceManager:
     
     async def get_service_health(self, name: str) -> Dict[str, Any]:
         """
-        Get health status for a specific service.
+        Get health status for a specific service (including Docker container health).
         
         Args:
             name: Service name
@@ -429,7 +478,15 @@ class ServiceManager:
         service = self._services[name]
         
         try:
-            return await service.health()
+            # Get service health
+            service_health = await service.health()
+            
+            # If running in Docker, also get container health
+            if name in self._docker_services and self._docker_manager:
+                container_health = await self._docker_manager.get_container_health(name)
+                service_health['container'] = container_health
+            
+            return service_health
         except Exception as e:
             logger.error(f"Failed to get health for service '{name}': {e}")
             return {
@@ -509,3 +566,28 @@ class ServiceManager:
             name for name, service in self._services.items()
             if service.state == ServiceState.FAILED
         ]
+    
+    async def shutdown(self) -> None:
+        """
+        Shutdown service manager and cleanup all resources.
+        
+        This stops all services and cleans up Docker containers.
+        """
+        logger.info("Shutting down service manager")
+        
+        try:
+            # Stop all services
+            await self.stop_all()
+            
+            # Cleanup Docker resources
+            if self._docker_manager:
+                await self._docker_manager.shutdown()
+            
+            logger.info("Service manager shutdown complete")
+            
+        except Exception as e:
+            logger.error(f"Error during service manager shutdown: {e}", exc_info=True)
+    
+    def is_docker_enabled(self) -> bool:
+        """Check if Docker integration is enabled and available."""
+        return self._docker_enabled and self._docker_manager is not None and self._docker_manager.is_available()

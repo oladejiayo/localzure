@@ -6,9 +6,12 @@ Defines the base contract that all service emulators must implement.
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
+
+if TYPE_CHECKING:
+    from localzure.core.docker_manager import DockerConfig
 
 
 class ServiceState(str, Enum):
@@ -160,6 +163,25 @@ class LocalZureService(ABC):
             List of ServiceRoute objects
         """
         pass
+    
+    def docker_config(self) -> Optional['DockerConfig']:
+        """
+        Get Docker configuration for this service.
+        
+        Returns:
+            DockerConfig if service should run in Docker, None for host mode
+            
+        Example:
+            from localzure.core.docker_manager import DockerConfig
+            
+            return DockerConfig(
+                image="mcr.microsoft.com/azure-storage/azurite",
+                ports={"10000": "10000", "10001": "10001"},
+                volumes={"/tmp/azurite": "/data"},
+                environment={"AZURITE_ACCOUNTS": "devstoreaccount1:..."}
+            )
+        """
+        return None
     
     def _transition_state(self, new_state: ServiceState, error: Optional[Exception] = None) -> None:
         """

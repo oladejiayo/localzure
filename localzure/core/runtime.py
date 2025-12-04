@@ -8,13 +8,14 @@ import asyncio
 import logging
 import time
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 
 from .config_manager import ConfigManager, LocalZureConfig
 from .logging_config import setup_logging, get_logger
+from .service_manager import ServiceManager
 
 logger = get_logger(__name__)
 
@@ -28,6 +29,7 @@ class LocalZureRuntime:
     
     def __init__(self):
         self._config_manager = ConfigManager()
+        self._service_manager: Optional[ServiceManager] = None
         self._config: Optional[LocalZureConfig] = None
         self._app: Optional[FastAPI] = None
         self._start_time: Optional[float] = None
@@ -71,15 +73,24 @@ class LocalZureRuntime:
                 format_type=self._config.logging.format,
                 log_file=self._config.logging.file,
                 rotation_size=self._config.logging.rotation_size,
-                rotation_count=self._config.logging.rotation_count
+                rotation_count=self._config.logging.rotation_count,
+                module_levels=self._config.logging.module_levels
             )
             
             logger.info(f"LocalZure v{self._config.version} initializing")
             
-            # Step 3: Initialize FastAPI application
+            # Step 3: Initialize Service Manager
+            service_config = self._config.services if self._config.services else {}
+            docker_enabled = self._config.docker_enabled if hasattr(self._config, 'docker_enabled') else False
+            self._service_manager = ServiceManager(config=service_config, docker_enabled=docker_enabled)
+            self._service_manager.discover_services()
+            await self._service_manager.initialize()
+            logger.info(f"Service manager initialized with {self._service_manager.service_count} service(s)")
+            
+            # Step 4: Initialize FastAPI application
             self._app = self._create_fastapi_app()
             
-            # Step 4: Register health check endpoint
+            # Step 5: Register health check endpoint
             self._register_health_endpoint()
             
             # Mark initialization as complete
@@ -156,14 +167,18 @@ class LocalZureRuntime:
         # Calculate uptime
         uptime = int(time.time() - self._start_time) if self._start_time else 0
         
-        # Check services status (placeholder for now)
+        # Get service statuses from service manager
         services_status = {}
-        for service_name, service_config in self._config.services.items():
-            if service_config.enabled:
-                services_status[service_name] = {
-                    "status": "unknown",
-                    "enabled": True
-                }
+        if self._service_manager:
+            services_status = self._service_manager.get_all_status()
+        else:
+            # Fallback to config if service manager not initialized
+            for service_name, service_config in self._config.services.items():
+                if service_config.enabled:
+                    services_status[service_name] = {
+                        "status": "unknown",
+                        "enabled": True
+                    }
         
         # Determine overall status
         if not self._initialization_complete:
@@ -171,14 +186,19 @@ class LocalZureRuntime:
         elif not self._is_running:
             overall_status = "degraded"
         else:
-            overall_status = "healthy"
+            # Check if any services are failed
+            failed_services = [s for s in services_status.values() if s.get("state") == "failed"]
+            if failed_services:
+                overall_status = "degraded"
+            else:
+                overall_status = "healthy"
         
         return {
             "status": overall_status,
             "version": self._config.version,
             "services": services_status,
             "uptime": uptime,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     
     async def start(self) -> None:
@@ -219,7 +239,9 @@ class LocalZureRuntime:
         logger.info("Stopping LocalZure runtime")
         
         try:
-            # Future: Stop services gracefully here
+            # Stop and cleanup service manager
+            if self._service_manager:
+                await self._service_manager.shutdown()
             
             self._is_running = False
             logger.info("LocalZure runtime stopped")

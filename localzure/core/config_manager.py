@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, List
 from enum import Enum
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,10 @@ class LoggingConfig(BaseModel):
     file: Optional[str] = None
     rotation_size: str = "10MB"
     rotation_count: int = 5
+    module_levels: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Per-module log levels, e.g., {'localzure.core.runtime': 'DEBUG'}"
+    )
 
 
 class ServerConfig(BaseModel):
@@ -106,9 +110,7 @@ class LocalZureConfig(BaseModel):
                 raise ValueError("Version components must be numeric")
         return v
     
-    class Config:
-        """Pydantic configuration."""
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class ConfigManager:

@@ -9,7 +9,7 @@ import logging.handlers
 import json
 import sys
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from contextvars import ContextVar
@@ -45,7 +45,7 @@ class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON."""
         log_data: Dict[str, Any] = {
-            "timestamp": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "module": record.name,
             "message": record.getMessage(),
@@ -79,17 +79,20 @@ def setup_logging(
     format_type: str = "json",
     log_file: Optional[str] = None,
     rotation_size: str = "10MB",
-    rotation_count: int = 5
+    rotation_count: int = 5,
+    module_levels: Optional[Dict[str, str]] = None
 ) -> None:
     """
     Configure LocalZure logging infrastructure.
     
     Args:
-        level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        level: Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         format_type: Log format ("json" or "text")
         log_file: Optional file path for log output
         rotation_size: Size limit for log rotation (e.g., "10MB")
         rotation_count: Number of rotated log files to keep
+        module_levels: Optional dict of module-specific log levels
+                      e.g., {"localzure.core.runtime": "DEBUG", "localzure.services": "INFO"}
     """
     # Get root logger
     root_logger = logging.getLogger()
@@ -131,6 +134,13 @@ def setup_logging(
         root_logger.addHandler(file_handler)
         
         root_logger.info(f"Logging to file: {log_file} (rotation: {rotation_size}, count: {rotation_count})")
+    
+    # Configure module-specific log levels
+    if module_levels:
+        for module_name, module_level in module_levels.items():
+            module_logger = logging.getLogger(module_name)
+            module_logger.setLevel(getattr(logging, module_level.upper()))
+            root_logger.info(f"Module '{module_name}' log level set to {module_level}")
     
     root_logger.info(f"Logging configured: level={level}, format={format_type}")
 

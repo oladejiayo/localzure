@@ -15,6 +15,11 @@ logging:
   file: null  # Optional: path to log file
   rotation_size: "10MB"
   rotation_count: 5
+  # Optional: Per-module log levels
+  # module_levels:
+  #   localzure.core.runtime: "DEBUG"
+  #   localzure.core.service_manager: "DEBUG"
+  #   localzure.services.blob: "INFO"
 
 # State backend configuration
 state_backend:

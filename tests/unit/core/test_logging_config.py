@@ -57,6 +57,43 @@ class TestLoggingSetup:
         
         assert isinstance(logger, logging.Logger)
         assert logger.name == "test.module"
+    
+    def test_setup_logging_with_module_levels(self):
+        """Test setting up logging with per-module log levels."""
+        setup_logging(
+            level="INFO",
+            module_levels={
+                "test.module.debug": "DEBUG",
+                "test.module.error": "ERROR"
+            }
+        )
+        
+        # Check root logger is INFO
+        root_logger = logging.getLogger()
+        assert root_logger.level == logging.INFO
+        
+        # Check module-specific levels
+        debug_logger = logging.getLogger("test.module.debug")
+        assert debug_logger.level == logging.DEBUG
+        
+        error_logger = logging.getLogger("test.module.error")
+        assert error_logger.level == logging.ERROR
+    
+    def test_module_level_filtering(self):
+        """Test that module-specific levels filter messages correctly."""
+        setup_logging(
+            level="INFO",
+            module_levels={"test.debug_module": "DEBUG"}
+        )
+        
+        # Logger with DEBUG level should log DEBUG messages
+        debug_logger = get_logger("test.debug_module")
+        assert debug_logger.isEnabledFor(logging.DEBUG)
+        
+        # Logger with default INFO should not log DEBUG
+        info_logger = get_logger("test.info_module")
+        assert not info_logger.isEnabledFor(logging.DEBUG)
+        assert info_logger.isEnabledFor(logging.INFO)
 
 
 class TestJSONFormatter:

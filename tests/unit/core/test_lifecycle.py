@@ -446,8 +446,8 @@ class TestSignalHandling:
         """Test signal handling."""
         manager = LifecycleManager(enable_signal_handlers=False)
         
-        # Simulate signal
-        await manager._handle_signal(signal.SIGTERM)
+        # Simulate signal (now synchronous)
+        manager._handle_signal(signal.SIGTERM)
         
         # Should set shutdown event
         assert manager._shutdown_event.is_set()

@@ -189,7 +189,7 @@ class LifecycleManager:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(
                     sig,
-                    lambda s=sig: asyncio.create_task(self._handle_signal(s))
+                    lambda s=sig: self._handle_signal(s)
                 )
             
             logger.info("Registered signal handlers for SIGTERM and SIGINT")
@@ -197,12 +197,15 @@ class LifecycleManager:
         except Exception as e:
             logger.error(f"Failed to register signal handlers: {e}", exc_info=True)
     
-    async def _handle_signal(self, sig: signal.Signals) -> None:
+    def _handle_signal(self, sig: signal.Signals) -> None:
         """
         Handle shutdown signal.
         
         Args:
             sig: Signal received
+        
+        Note:
+            This is a synchronous function called by asyncio signal handlers.
         """
         logger.info(f"Received signal {sig.name}, initiating graceful shutdown")
         self._signal_received = sig

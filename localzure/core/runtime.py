@@ -192,44 +192,11 @@ class LocalZureRuntime:
             Dictionary containing health status information
         """
         if not self._config:
-            return {
-                "status": "unhealthy",
-                "version": "unknown",
-                "services": {},
-                "uptime": 0,
-                "message": "Runtime not initialized"
-            }
+            return self._get_uninitialized_health_status()
         
-        # Calculate uptime
         uptime = int(time.time() - self._start_time) if self._start_time else 0
-        
-        # Get service statuses from service manager
-        services_status = {}
-        if self._service_manager:
-            services_status = self._service_manager.get_all_status()
-        else:
-            # Fallback to config if service manager not initialized
-            for service_name, service_config in self._config.services.items():
-                if service_config.enabled:
-                    services_status[service_name] = {
-                        "status": "unknown",
-                        "enabled": True
-                    }
-        
-        # Determine overall status
-        if not self._initialization_complete:
-            overall_status = "unhealthy"
-        elif self._lifecycle_manager and self._lifecycle_manager.is_draining():
-            overall_status = "draining"
-        elif not self._is_running:
-            overall_status = "degraded"
-        else:
-            # Check if any services are failed
-            failed_services = [s for s in services_status.values() if s.get("state") == "failed"]
-            if failed_services:
-                overall_status = "degraded"
-            else:
-                overall_status = "healthy"
+        services_status = self._get_services_status()
+        overall_status = self._determine_overall_status(services_status)
         
         return {
             "status": overall_status,
@@ -239,6 +206,46 @@ class LocalZureRuntime:
             "in_flight_requests": self._lifecycle_manager.get_request_tracker().get_in_flight_count() if self._lifecycle_manager else 0,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+    
+    def _get_uninitialized_health_status(self) -> Dict[str, Any]:
+        """Return health status for uninitialized runtime."""
+        return {
+            "status": "unhealthy",
+            "version": "unknown",
+            "services": {},
+            "uptime": 0,
+            "message": "Runtime not initialized"
+        }
+    
+    def _get_services_status(self) -> Dict[str, Any]:
+        """Get status of all services."""
+        if self._service_manager:
+            return self._service_manager.get_all_status()
+        
+        # Fallback to config if service manager not initialized
+        services_status = {}
+        for service_name, service_config in self._config.services.items():
+            if service_config.enabled:
+                services_status[service_name] = {
+                    "status": "unknown",
+                    "enabled": True
+                }
+        return services_status
+    
+    def _determine_overall_status(self, services_status: Dict[str, Any]) -> str:
+        """Determine overall system status based on runtime and service states."""
+        if not self._initialization_complete:
+            return "unhealthy"
+        
+        if self._lifecycle_manager and self._lifecycle_manager.is_draining():
+            return "draining"
+        
+        if not self._is_running:
+            return "degraded"
+        
+        # Check if any services are failed
+        failed_services = [s for s in services_status.values() if s.get("state") == "failed"]
+        return "degraded" if failed_services else "healthy"
     
     async def start(self) -> None:
         """
@@ -262,6 +269,8 @@ class LocalZureRuntime:
                 self._lifecycle_manager.set_state(LifecycleState.STARTING)
             
             # Future: Start service manager and services here
+            # Placeholder await to satisfy async requirement
+            await asyncio.sleep(0)
             
             self._is_running = True
             

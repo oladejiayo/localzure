@@ -968,18 +968,144 @@ GatewayMiddleware(
 - OAuth 2.0 / Azure AD mock
 - CORS handling
 
-### 3. Service Emulator Layer (PENDING)
+### 3. Service Emulator Layer
 
 **Purpose:** Implement Azure service-specific logic and API compatibility.
 
+**Status:** In Development (Blob Storage Container Operations implemented)
+
+#### 3.1 Blob Storage Service ✅ IMPLEMENTED (SVC-BLOB-001)
+
+**Purpose:** Emulate Azure Blob Storage API for container and blob operations.
+
+**Location:** `localzure/services/blob/`
+
+**Implemented Features:**
+- Container lifecycle management (create, list, delete)
+- Container metadata operations
+- Container properties (ETag, Last-Modified, Lease Status/State)
+- Public access level support (private, blob, container)
+- Azure naming validation (3-63 chars, lowercase, alphanumeric, hyphens)
+- Azure-compatible error codes (ContainerAlreadyExists, ContainerNotFound, InvalidContainerName)
+
+**Architecture:**
+
+```
+┌──────────────────────────────────────────┐
+│          FastAPI Endpoints               │
+│     (api.py - REST handlers)             │
+│  PUT /{account}/{container}              │
+│  GET /{account}                          │
+│  GET /{account}/{container}              │
+│  PUT /{account}/{container}/metadata     │
+│  DELETE /{account}/{container}           │
+└──────────────────────────────────────────┘
+                  ▼
+┌──────────────────────────────────────────┐
+│        Pydantic Models                   │
+│     (models.py - data validation)        │
+│  - Container                             │
+│  - ContainerMetadata                     │
+│  - ContainerProperties                   │
+│  - ContainerNameValidator                │
+└──────────────────────────────────────────┘
+                  ▼
+┌──────────────────────────────────────────┐
+│       Storage Backend                    │
+│   (backend.py - state management)        │
+│  - ContainerBackend (in-memory)          │
+│  - Async operations with locks           │
+│  - ETag generation                       │
+│  - Timestamp tracking                    │
+└──────────────────────────────────────────┘
+```
+
+**Container Naming Rules:**
+- Length: 3-63 characters
+- Characters: lowercase letters, numbers, hyphens only
+- Must start and end with letter or number
+- No consecutive hyphens
+
+**API Endpoints:**
+
+| Method | Path | Description | Status Codes |
+|--------|------|-------------|--------------|
+| PUT | `/{account}/{container}` | Create container | 201, 400, 409 |
+| GET | `/{account}` | List containers | 200 |
+| GET | `/{account}/{container}` | Get properties | 200, 404 |
+| PUT | `/{account}/{container}/metadata` | Set metadata | 200, 404 |
+| DELETE | `/{account}/{container}` | Delete container | 202, 404 |
+
+**Error Codes:**
+- `ContainerAlreadyExists` (409): Container already exists
+- `ContainerNotFound` (404): Container not found
+- `InvalidContainerName` (400): Name violates Azure rules
+- `InvalidHeaderValue` (400): Invalid header value
+
+**Container Metadata:**
+- Key-value pairs stored as HTTP headers
+- Prefix: `x-ms-meta-*`
+- Keys automatically converted to lowercase
+- Updated via PUT to `/metadata` endpoint
+
+**Container Properties:**
+- `ETag`: Unique identifier, updated on changes
+- `Last-Modified`: Timestamp of last modification
+- `LeaseStatus`: locked | unlocked
+- `LeaseState`: available | leased | expired | breaking | broken
+- `PublicAccess`: private | blob | container
+- `HasImmutabilityPolicy`: boolean
+- `HasLegalHold`: boolean
+
+**Implementation Details:**
+- **Lines of Code:** 459 (models: 191, backend: 223, api: 269)
+- **Test Coverage:** 61 tests (41 unit, 20 integration)
+- **Backend:** In-memory storage with asyncio locks for thread safety
+- **ETag Generation:** MD5 hash of UUID for uniqueness
+- **Timestamps:** Timezone-aware UTC timestamps
+
+**Pending Features:**
+- Blob operations (upload, download, list, delete)
+- Lease operations
+- Snapshots
+- CORS support
+- Shared Access Signature (SAS) validation
+- Shared Key authentication
+
+**Usage Example:**
+```python
+from fastapi import FastAPI
+from localzure.services.blob.api import router
+
+app = FastAPI()
+app.include_router(router)
+
+# Create container
+# PUT /blob/myaccount/mycontainer
+# x-ms-meta-key: value
+
+# List containers
+# GET /blob/myaccount?prefix=my&maxresults=10
+
+# Get properties
+# GET /blob/myaccount/mycontainer
+
+# Set metadata
+# PUT /blob/myaccount/mycontainer/metadata
+# x-ms-meta-newkey: newvalue
+
+# Delete container
+# DELETE /blob/myaccount/mycontainer
+```
+
 **Planned Services:**
-- Blob Storage (Azure Storage Blobs)
-- Queue Storage (Azure Storage Queues)
-- Table Storage (Azure Storage Tables)
-- Service Bus (Topics & Queues)
-- Key Vault (Secrets, Keys, Certificates)
-- Cosmos DB (NoSQL database)
-- Functions (Serverless compute)
+- Blob Storage (Blob operations - PENDING)
+- Queue Storage (Azure Storage Queues - PENDING)
+- Table Storage (Azure Storage Tables - PENDING)
+- Service Bus (Topics & Queues - PENDING)
+- Key Vault (Secrets, Keys, Certificates - PENDING)
+- Cosmos DB (NoSQL database - PENDING)
+- Functions (Serverless compute - PENDING)
 
 ### 4. State Backend Layer (PENDING)
 

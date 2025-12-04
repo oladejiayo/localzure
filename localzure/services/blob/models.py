@@ -390,3 +390,45 @@ class ConditionalHeaders(BaseModel):
         
         return None
 
+
+class LeaseAction(str, Enum):
+    """Lease action types."""
+    ACQUIRE = "acquire"
+    RENEW = "renew"
+    RELEASE = "release"
+    BREAK = "break"
+    CHANGE = "change"
+
+
+class Lease(BaseModel):
+    """
+    Lease information for blob or container.
+    
+    Represents an exclusive lock on a resource with expiration.
+    """
+    
+    lease_id: str = Field(description="GUID lease identifier")
+    duration: int = Field(description="Lease duration in seconds (-1 for infinite)")
+    acquired_time: datetime = Field(description="When lease was acquired")
+    expiration_time: Optional[datetime] = Field(default=None, description="When lease expires (None for infinite)")
+    break_time: Optional[datetime] = Field(default=None, description="When lease will be broken")
+    state: LeaseState = Field(default=LeaseState.LEASED)
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    def is_expired(self) -> bool:
+        """Check if lease has expired."""
+        if self.expiration_time is None:
+            return False
+        return datetime.now(timezone.utc) >= self.expiration_time
+    
+    def is_breaking(self) -> bool:
+        """Check if lease is in breaking state."""
+        return self.state == LeaseState.BREAKING
+    
+    def is_broken(self) -> bool:
+        """Check if lease break period has passed."""
+        if self.break_time is None:
+            return False
+        return datetime.now(timezone.utc) >= self.break_time
+

@@ -18,4 +18,8 @@ __all__ = [
     "BlobType",
     "BlobTier",
     "Block",
+    "Lease",
+    "LeaseAction",
+    "LeaseState",
+    "LeaseStatus",
 ]

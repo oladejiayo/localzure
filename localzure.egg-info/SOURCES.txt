@@ -1,0 +1,13 @@
+LICENSE
+README.md
+pyproject.toml
+localzure/__init__.py
+localzure.egg-info/PKG-INFO
+localzure.egg-info/SOURCES.txt
+localzure.egg-info/dependency_links.txt
+localzure.egg-info/requires.txt
+localzure.egg-info/top_level.txt
+localzure/core/__init__.py
+localzure/core/config_manager.py
+localzure/core/logging_config.py
+localzure/core/runtime.py

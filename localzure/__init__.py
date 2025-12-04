@@ -5,7 +5,7 @@ A fully local Azure cloud platform emulator for offline development and testing.
 """
 
 __version__ = "0.1.0"
-__author__ = "LocalZure Contributors"
+__author__ = "Ayodele Oladeji"
 
 from .core.runtime import LocalZureRuntime
 

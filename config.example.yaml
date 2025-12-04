@@ -1,0 +1,75 @@
+# Example LocalZure Configuration File (YAML)
+
+version: "0.1.0"
+
+# HTTP server configuration
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+
+# Logging configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "json"  # json or text
+  file: null  # Optional: path to log file
+  rotation_size: "10MB"
+  rotation_count: 5
+
+# State backend configuration
+state_backend:
+  type: "memory"  # memory, redis, sqlite, file
+  
+  # Redis configuration (when type=redis)
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: null
+  key_prefix: "localzure:"
+  
+  # SQLite configuration (when type=sqlite)
+  sqlite_path: null  # e.g., "./data/localzure.db"
+  
+  # File configuration (when type=file)
+  file_path: null  # e.g., "./data/state.json"
+
+# Docker integration
+docker_enabled: false
+
+# Service configurations
+services:
+  blob:
+    enabled: true
+    port: 10000
+    docker: false
+    docker_image: null  # e.g., "mcr.microsoft.com/azure-storage/azurite"
+  
+  queue:
+    enabled: true
+    port: 10001
+    docker: false
+    docker_image: null
+  
+  table:
+    enabled: true
+    port: 10002
+    docker: false
+    docker_image: null
+  
+  servicebus:
+    enabled: false
+    port: 5672
+    docker: false
+    docker_image: null
+  
+  keyvault:
+    enabled: false
+    port: 8200
+    docker: false
+    docker_image: null
+  
+  cosmos:
+    enabled: false
+    port: 8081
+    docker: false
+    docker_image: null

@@ -66,34 +66,187 @@ def _format_error_response(code: str, message: str) -> Dict:
 @router.put(
     "/{account_name}/{container_name}",
     status_code=status.HTTP_201_CREATED,
-    summary="Create Container",
+    summary="Create Container or Container Operations",
 )
-async def create_container(
+async def create_container_or_ops(
     account_name: str,
     container_name: str,
     request: Request,
     x_ms_blob_public_access: Optional[str] = Header(None),
     x_ms_meta_prefix: Optional[str] = Header(None, alias="x-ms-meta-*"),
+    comp: Optional[str] = Query(None),
+    restype: Optional[str] = Query(None),
+    x_ms_lease_action: Optional[str] = Header(None, alias="x-ms-lease-action"),
+    x_ms_lease_duration: Optional[int] = Header(None, alias="x-ms-lease-duration"),
+    x_ms_lease_id: Optional[str] = Header(None, alias="x-ms-lease-id"),
+    x_ms_proposed_lease_id: Optional[str] = Header(None, alias="x-ms-proposed-lease-id"),
+    x_ms_lease_break_period: Optional[int] = Header(None, alias="x-ms-lease-break-period"),
 ) -> Response:
     """
-    Create a new container.
+    Create a container or perform container operations (lease).
     
-    Azure REST API: PUT https://{account}.blob.core.windows.net/{container}?restype=container
+    Azure REST API: 
+    - PUT https://{account}.blob.core.windows.net/{container}?restype=container (create)
+    - PUT https://{account}.blob.core.windows.net/{container}?comp=lease (lease operations)
     
     Args:
         account_name: Storage account name
         container_name: Container name
         request: FastAPI request
-        x_ms_blob_public_access: Public access level
-        x_ms_meta_prefix: Metadata headers (x-ms-meta-*)
+        x_ms_blob_public_access: Public access level (for create)
+        x_ms_meta_prefix: Metadata headers (x-ms-meta-*) (for create)
+        comp: Component parameter (lease)
+        restype: Resource type parameter (container)
+        x_ms_lease_action: Lease action (acquire, renew, release, break, change)
+        x_ms_lease_duration: Lease duration in seconds
+        x_ms_lease_id: Lease ID
+        x_ms_proposed_lease_id: Proposed lease ID
+        x_ms_lease_break_period: Break period in seconds
         
     Returns:
-        201 Created with headers
+        201 Created with headers (create)
+        201 Created with lease ID (acquire)
+        200 OK (renew, release)
+        202 Accepted (break)
         
     Raises:
-        400 Bad Request: Invalid container name
+        400 Bad Request: Invalid container name or parameters
         409 Conflict: Container already exists
     """
+    # Handle lease operations
+    if comp == "lease":
+        if not x_ms_lease_action:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-action is required for lease operations"),
+            )
+        
+        action = x_ms_lease_action.lower()
+        
+        try:
+            if action == "acquire":
+                if x_ms_lease_duration is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-duration is required for acquire"),
+                    )
+                
+                lease = await backend.acquire_container_lease(
+                    container_name=container_name,
+                    duration=x_ms_lease_duration,
+                    proposed_lease_id=x_ms_proposed_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_201_CREATED)
+                response.headers["x-ms-lease-id"] = lease.lease_id
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "renew":
+                if x_ms_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for renew"),
+                    )
+                
+                lease = await backend.renew_container_lease(
+                    container_name=container_name,
+                    lease_id=x_ms_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_200_OK)
+                response.headers["x-ms-lease-id"] = lease.lease_id
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "release":
+                if x_ms_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for release"),
+                    )
+                
+                await backend.release_container_lease(
+                    container_name=container_name,
+                    lease_id=x_ms_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_200_OK)
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "break":
+                remaining_time = await backend.break_container_lease(
+                    container_name=container_name,
+                    break_period=x_ms_lease_break_period,
+                )
+                
+                response = Response(status_code=status.HTTP_202_ACCEPTED)
+                response.headers["x-ms-lease-time"] = str(remaining_time)
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "change":
+                if x_ms_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for change"),
+                    )
+                if x_ms_proposed_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-proposed-lease-id is required for change"),
+                    )
+                
+                lease = await backend.change_container_lease(
+                    container_name=container_name,
+                    lease_id=x_ms_lease_id,
+                    proposed_lease_id=x_ms_proposed_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_200_OK)
+                response.headers["x-ms-lease-id"] = lease.lease_id
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=_format_error_response("InvalidHeaderValue", f"Invalid lease action: {action}"),
+                )
+        
+        except (LeaseNotFoundError, ContainerNotFoundError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=_format_error_response(type(e).__name__.replace("Error", ""), str(e)),
+            )
+        except LeaseAlreadyPresentError as e:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_format_error_response("LeaseAlreadyPresent", str(e)),
+            )
+        except LeaseIdMismatchError as e:
+            raise HTTPException(
+                status_code=status.HTTP_412_PRECONDITION_FAILED,
+                detail=_format_error_response("LeaseIdMismatchConditionNotMet", str(e)),
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_format_error_response("InvalidHeaderValue", str(e)),
+            )
+    
+    # Handle container creation (default behavior if no comp parameter)
     try:
         # Extract metadata from headers
         metadata = {}
@@ -430,11 +583,15 @@ async def put_blob(
     if_match: Optional[str] = Header(None),
     if_none_match: Optional[str] = Header(None),
     x_ms_lease_id: Optional[str] = Header(None, alias="x-ms-lease-id"),
+    x_ms_lease_action: Optional[str] = Header(None, alias="x-ms-lease-action"),
+    x_ms_lease_duration: Optional[int] = Header(None, alias="x-ms-lease-duration"),
+    x_ms_proposed_lease_id: Optional[str] = Header(None, alias="x-ms-proposed-lease-id"),
+    x_ms_lease_break_period: Optional[int] = Header(None, alias="x-ms-lease-break-period"),
     comp: Optional[str] = Query(None),
     blockid: Optional[str] = Query(None),
 ) -> Response:
     """
-    Upload a blob or stage a block.
+    Upload a blob or stage a block or perform lease operations.
     
     Azure REST API: PUT https://{account}.blob.core.windows.net/{container}/{blob}
     
@@ -451,16 +608,159 @@ async def put_blob(
         content_disposition: Content disposition
         if_match: Conditional ETag match
         if_none_match: Conditional ETag non-match
-        comp: Operation component (block, blocklist, metadata)
+        x_ms_lease_id: Lease ID
+        x_ms_lease_action: Lease action (acquire, renew, release, break, change)
+        x_ms_lease_duration: Lease duration in seconds
+        x_ms_proposed_lease_id: Proposed lease ID
+        x_ms_lease_break_period: Break period in seconds
+        comp: Operation component (block, blocklist, metadata, lease)
         blockid: Block ID for Put Block operation
         
     Returns:
-        201 Created for Put Blob, 201 Created for Put Block
+        201 Created for Put Blob, 201 Created for Put Block, various for lease
         
     Raises:
-        404 Not Found: Container not found
-        400 Bad Request: Invalid block ID
+        404 Not Found: Container not found or blob not found
+        400 Bad Request: Invalid block ID or parameters
     """
+    # Handle lease operations
+    if comp == "lease":
+        if not x_ms_lease_action:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-action is required for lease operations"),
+            )
+        
+        action = x_ms_lease_action.lower()
+        
+        try:
+            if action == "acquire":
+                if x_ms_lease_duration is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-duration is required for acquire"),
+                    )
+                
+                lease = await backend.acquire_blob_lease(
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    duration=x_ms_lease_duration,
+                    proposed_lease_id=x_ms_proposed_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_201_CREATED)
+                response.headers["x-ms-lease-id"] = lease.lease_id
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "renew":
+                if x_ms_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for renew"),
+                    )
+                
+                lease = await backend.renew_blob_lease(
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    lease_id=x_ms_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_200_OK)
+                response.headers["x-ms-lease-id"] = lease.lease_id
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "release":
+                if x_ms_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for release"),
+                    )
+                
+                await backend.release_blob_lease(
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    lease_id=x_ms_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_200_OK)
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "break":
+                remaining_time = await backend.break_blob_lease(
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    break_period=x_ms_lease_break_period,
+                )
+                
+                response = Response(status_code=status.HTTP_202_ACCEPTED)
+                response.headers["x-ms-lease-time"] = str(remaining_time)
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            elif action == "change":
+                if x_ms_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for change"),
+                    )
+                if x_ms_proposed_lease_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=_format_error_response("MissingRequiredHeader", "x-ms-proposed-lease-id is required for change"),
+                    )
+                
+                lease = await backend.change_blob_lease(
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    lease_id=x_ms_lease_id,
+                    proposed_lease_id=x_ms_proposed_lease_id,
+                )
+                
+                response = Response(status_code=status.HTTP_200_OK)
+                response.headers["x-ms-lease-id"] = lease.lease_id
+                response.headers["x-ms-request-id"] = "localzure-request-id"
+                response.headers["x-ms-version"] = "2021-08-06"
+                response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                return response
+            
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=_format_error_response("InvalidHeaderValue", f"Invalid lease action: {action}"),
+                )
+        
+        except (LeaseNotFoundError, ContainerNotFoundError, BlobNotFoundError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=_format_error_response(type(e).__name__.replace("Error", ""), str(e)),
+            )
+        except LeaseAlreadyPresentError as e:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_format_error_response("LeaseAlreadyPresent", str(e)),
+            )
+        except LeaseIdMismatchError as e:
+            raise HTTPException(
+                status_code=status.HTTP_412_PRECONDITION_FAILED,
+                detail=_format_error_response("LeaseIdMismatchConditionNotMet", str(e)),
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_format_error_response("InvalidHeaderValue", str(e)),
+            )
+    
     # Handle Put Block operation
     if comp == "block" and blockid:
         try:
@@ -860,390 +1160,4 @@ async def reset_backend() -> Dict:
     """
     await backend.reset()
     return {"message": "Backend reset successfully"}
-
-
-# ============================================================================
-# Lease Operations
-# ============================================================================
-
-
-@router.put(
-    "/{account_name}/{container_name}",
-    status_code=status.HTTP_200_OK,
-    summary="Lease Container",
-)
-async def lease_container(
-    account_name: str,
-    container_name: str,
-    x_ms_lease_action: str = Header(..., alias="x-ms-lease-action"),
-    x_ms_lease_duration: Optional[int] = Header(None, alias="x-ms-lease-duration"),
-    x_ms_lease_id: Optional[str] = Header(None, alias="x-ms-lease-id"),
-    x_ms_proposed_lease_id: Optional[str] = Header(None, alias="x-ms-proposed-lease-id"),
-    x_ms_lease_break_period: Optional[int] = Header(None, alias="x-ms-lease-break-period"),
-    comp: str = Query(...),
-) -> Response:
-    """
-    Lease a container.
-    
-    Azure REST API: PUT https://{account}.blob.core.windows.net/{container}?comp=lease
-    
-    Args:
-        account_name: Storage account name
-        container_name: Container name
-        x_ms_lease_action: Lease action (acquire, renew, release, break, change)
-        x_ms_lease_duration: Lease duration in seconds (15-60 or -1 for infinite) - required for acquire
-        x_ms_lease_id: Lease ID - required for renew, release, change
-        x_ms_proposed_lease_id: Proposed lease ID - optional for acquire, required for change
-        x_ms_lease_break_period: Break period in seconds (0-60) - optional for break
-        comp: Query parameter, must be "lease"
-        
-    Returns:
-        Response with lease information in headers
-    """
-    # Validate comp parameter
-    if comp != "lease":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_format_error_response("InvalidQueryParameterValue", "comp must be 'lease'"),
-        )
-    
-    # Normalize lease action
-    action = x_ms_lease_action.lower()
-    
-    try:
-        if action == "acquire":
-            # Validate duration is provided
-            if x_ms_lease_duration is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-duration is required for acquire"),
-                )
-            
-            # Acquire lease
-            lease = await backend.acquire_container_lease(
-                container_name=container_name,
-                duration=x_ms_lease_duration,
-                proposed_lease_id=x_ms_proposed_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_201_CREATED)
-            response.headers["x-ms-lease-id"] = lease.lease_id
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "renew":
-            # Validate lease ID is provided
-            if x_ms_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for renew"),
-                )
-            
-            # Renew lease
-            lease = await backend.renew_container_lease(
-                container_name=container_name,
-                lease_id=x_ms_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_200_OK)
-            response.headers["x-ms-lease-id"] = lease.lease_id
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "release":
-            # Validate lease ID is provided
-            if x_ms_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for release"),
-                )
-            
-            # Release lease
-            await backend.release_container_lease(
-                container_name=container_name,
-                lease_id=x_ms_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_200_OK)
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "break":
-            # Break lease
-            remaining_time = await backend.break_container_lease(
-                container_name=container_name,
-                break_period=x_ms_lease_break_period,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_202_ACCEPTED)
-            response.headers["x-ms-lease-time"] = str(remaining_time)
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "change":
-            # Validate lease ID and proposed lease ID are provided
-            if x_ms_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for change"),
-                )
-            if x_ms_proposed_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-proposed-lease-id is required for change"),
-                )
-            
-            # Change lease
-            lease = await backend.change_container_lease(
-                container_name=container_name,
-                lease_id=x_ms_lease_id,
-                proposed_lease_id=x_ms_proposed_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_200_OK)
-            response.headers["x-ms-lease-id"] = lease.lease_id
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=_format_error_response(
-                    "InvalidHeaderValue",
-                    f"Invalid lease action: {x_ms_lease_action}. Must be one of: acquire, renew, release, break, change"
-                ),
-            )
-    
-    except ContainerNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_format_error_response("ContainerNotFound", "Container not found"),
-        )
-    except LeaseAlreadyPresentError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=_format_error_response("LeaseAlreadyPresent", "There is already a lease present"),
-        )
-    except LeaseIdMissingError:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail=_format_error_response("LeaseIdMissing", "There is currently a lease on the resource and no lease ID was specified in the request"),
-        )
-    except LeaseIdMismatchError:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail=_format_error_response("LeaseIdMismatchWithLeaseOperation", "The lease ID specified did not match the lease ID for the resource"),
-        )
-    except LeaseNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_format_error_response("LeaseNotFound", "Lease not found"),
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_format_error_response("InvalidHeaderValue", str(e)),
-        )
-
-
-@router.put(
-    "/{account_name}/{container_name}/{blob_name:path}",
-    status_code=status.HTTP_200_OK,
-    summary="Lease Blob",
-)
-async def lease_blob(
-    account_name: str,
-    container_name: str,
-    blob_name: str,
-    x_ms_lease_action: str = Header(..., alias="x-ms-lease-action"),
-    x_ms_lease_duration: Optional[int] = Header(None, alias="x-ms-lease-duration"),
-    x_ms_lease_id: Optional[str] = Header(None, alias="x-ms-lease-id"),
-    x_ms_proposed_lease_id: Optional[str] = Header(None, alias="x-ms-proposed-lease-id"),
-    x_ms_lease_break_period: Optional[int] = Header(None, alias="x-ms-lease-break-period"),
-    comp: str = Query(...),
-) -> Response:
-    """
-    Lease a blob.
-    
-    Azure REST API: PUT https://{account}.blob.core.windows.net/{container}/{blob}?comp=lease
-    
-    Args:
-        account_name: Storage account name
-        container_name: Container name
-        blob_name: Blob name
-        x_ms_lease_action: Lease action (acquire, renew, release, break, change)
-        x_ms_lease_duration: Lease duration in seconds (15-60 or -1 for infinite) - required for acquire
-        x_ms_lease_id: Lease ID - required for renew, release, change
-        x_ms_proposed_lease_id: Proposed lease ID - optional for acquire, required for change
-        x_ms_lease_break_period: Break period in seconds (0-60) - optional for break
-        comp: Query parameter, must be "lease"
-        
-    Returns:
-        Response with lease information in headers
-    """
-    # Validate comp parameter
-    if comp != "lease":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_format_error_response("InvalidQueryParameterValue", "comp must be 'lease'"),
-        )
-    
-    # Normalize lease action
-    action = x_ms_lease_action.lower()
-    
-    try:
-        if action == "acquire":
-            # Validate duration is provided
-            if x_ms_lease_duration is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-duration is required for acquire"),
-                )
-            
-            # Acquire lease
-            lease = await backend.acquire_blob_lease(
-                container_name=container_name,
-                blob_name=blob_name,
-                duration=x_ms_lease_duration,
-                proposed_lease_id=x_ms_proposed_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_201_CREATED)
-            response.headers["x-ms-lease-id"] = lease.lease_id
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "renew":
-            # Validate lease ID is provided
-            if x_ms_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for renew"),
-                )
-            
-            # Renew lease
-            lease = await backend.renew_blob_lease(
-                container_name=container_name,
-                blob_name=blob_name,
-                lease_id=x_ms_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_200_OK)
-            response.headers["x-ms-lease-id"] = lease.lease_id
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "release":
-            # Validate lease ID is provided
-            if x_ms_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for release"),
-                )
-            
-            # Release lease
-            await backend.release_blob_lease(
-                container_name=container_name,
-                blob_name=blob_name,
-                lease_id=x_ms_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_200_OK)
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "break":
-            # Break lease
-            remaining_time = await backend.break_blob_lease(
-                container_name=container_name,
-                blob_name=blob_name,
-                break_period=x_ms_lease_break_period,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_202_ACCEPTED)
-            response.headers["x-ms-lease-time"] = str(remaining_time)
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        elif action == "change":
-            # Validate lease ID and proposed lease ID are provided
-            if x_ms_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-lease-id is required for change"),
-                )
-            if x_ms_proposed_lease_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_format_error_response("MissingRequiredHeader", "x-ms-proposed-lease-id is required for change"),
-                )
-            
-            # Change lease
-            lease = await backend.change_blob_lease(
-                container_name=container_name,
-                blob_name=blob_name,
-                lease_id=x_ms_lease_id,
-                proposed_lease_id=x_ms_proposed_lease_id,
-            )
-            
-            # Build response
-            response = Response(status_code=status.HTTP_200_OK)
-            response.headers["x-ms-lease-id"] = lease.lease_id
-            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-            return response
-        
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=_format_error_response(
-                    "InvalidHeaderValue",
-                    f"Invalid lease action: {x_ms_lease_action}. Must be one of: acquire, renew, release, break, change"
-                ),
-            )
-    
-    except ContainerNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_format_error_response("ContainerNotFound", "Container not found"),
-        )
-    except BlobNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_format_error_response("BlobNotFound", "Blob not found"),
-        )
-    except LeaseAlreadyPresentError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=_format_error_response("LeaseAlreadyPresent", "There is already a lease present"),
-        )
-    except LeaseIdMissingError:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail=_format_error_response("LeaseIdMissing", "There is currently a lease on the resource and no lease ID was specified in the request"),
-        )
-    except LeaseIdMismatchError:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail=_format_error_response("LeaseIdMismatchWithLeaseOperation", "The lease ID specified did not match the lease ID for the resource"),
-        )
-    except LeaseNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_format_error_response("LeaseNotFound", "Lease not found"),
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_format_error_response("InvalidHeaderValue", str(e)),
-        )
-
 

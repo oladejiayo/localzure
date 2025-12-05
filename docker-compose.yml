@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  localzure:
+    build: .
+    image: localzure/localzure:latest
+    container_name: localzure
+    ports:
+      - "7071:7071"
+    environment:
+      - LOCALZURE_HOST=0.0.0.0
+      - LOCALZURE_PORT=7071
+      - LOCALZURE_LOG_LEVEL=INFO
+    volumes:
+      # Mount config file if needed
+      - ./config.yaml:/app/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7071/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - localzure-network
+
+networks:
+  localzure-network:
+    driver: bridge

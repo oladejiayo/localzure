@@ -272,6 +272,8 @@ class BlobProperties(BaseModel):
     lease_state: LeaseState = Field(default=LeaseState.AVAILABLE)
     blob_tier: BlobTier = Field(default=BlobTier.HOT)
     creation_time: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Blob creation timestamp")
+    is_snapshot: bool = Field(default=False, description="Whether this blob is a snapshot")
+    snapshot_time: Optional[datetime] = Field(default=None, description="Snapshot creation time (for snapshots only)")
     
     def to_headers(self) -> Dict[str, str]:
         """Convert properties to HTTP headers."""
@@ -297,6 +299,8 @@ class BlobProperties(BaseModel):
             headers['Cache-Control'] = self.cache_control
         if self.content_disposition:
             headers['Content-Disposition'] = self.content_disposition
+        if self.is_snapshot and self.snapshot_time:
+            headers['x-ms-snapshot'] = self.snapshot_time.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
         
         return headers
 
@@ -306,6 +310,7 @@ class Blob(BaseModel):
     Azure Blob Storage blob.
     
     Represents a blob with content, metadata, and properties.
+    Supports snapshots via snapshot_id field.
     """
     
     name: str = Field(description="Blob name")
@@ -315,12 +320,13 @@ class Blob(BaseModel):
     properties: BlobProperties
     uncommitted_blocks: Dict[str, Block] = Field(default_factory=dict)
     committed_blocks: List[str] = Field(default_factory=list)  # Ordered list of block IDs
+    snapshot_id: Optional[str] = Field(default=None, description="Snapshot identifier (RFC1123 datetime)")
     
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     def to_dict(self) -> Dict:
         """Convert blob to dictionary for API responses."""
-        return {
+        blob_dict = {
             'Name': self.name,
             'Properties': {
                 'Content-Length': self.properties.content_length,
@@ -334,6 +340,13 @@ class Blob(BaseModel):
             },
             'Metadata': self.metadata.metadata,
         }
+        
+        # Add snapshot info if this is a snapshot
+        if self.snapshot_id:
+            blob_dict['Snapshot'] = self.snapshot_id
+            blob_dict['Properties']['Snapshot'] = self.snapshot_id
+        
+        return blob_dict
 
 
 class BlockListType(str, Enum):

@@ -82,6 +82,11 @@ class LeaseNotFoundError(Exception):
     pass
 
 
+class SnapshotNotFoundError(Exception):
+    """Raised when snapshot is not found."""
+    pass
+
+
 class ContainerBackend:
     """
     In-memory storage backend for containers and blobs.
@@ -94,6 +99,7 @@ class ContainerBackend:
         """Initialize the container backend."""
         self._containers: Dict[str, Container] = {}
         self._blobs: Dict[str, Dict[str, Blob]] = {}  # container_name -> {blob_name -> Blob}
+        self._snapshots: Dict[str, Dict[str, Dict[str, Blob]]] = {}  # container_name -> {blob_name -> {snapshot_id -> Blob}}
         self._container_leases: Dict[str, Lease] = {}  # container_name -> Lease
         self._blob_leases: Dict[str, Dict[str, Lease]] = {}  # container_name -> {blob_name -> Lease}
         self._lock = asyncio.Lock()
@@ -279,10 +285,11 @@ class ContainerBackend:
             return name in self._containers
     
     async def reset(self) -> None:
-        """Reset the backend, removing all containers, blobs, and leases."""
+        """Reset the backend, removing all containers, blobs, snapshots, and leases."""
         async with self._lock:
             self._containers.clear()
             self._blobs.clear()
+            self._snapshots.clear()
             self._container_leases.clear()
             self._blob_leases.clear()
     
@@ -496,6 +503,7 @@ class ContainerBackend:
         delimiter: Optional[str] = None,
         max_results: Optional[int] = None,
         marker: Optional[str] = None,
+        include_snapshots: bool = False,
     ) -> tuple[List[Blob], Optional[str]]:
         """
         List blobs in a container.
@@ -506,6 +514,7 @@ class ContainerBackend:
             delimiter: Optional delimiter for hierarchical listing
             max_results: Optional maximum number of results
             marker: Optional continuation marker
+            include_snapshots: Whether to include snapshots in the listing
             
         Returns:
             Tuple of (list of blobs, next_marker)
@@ -518,20 +527,26 @@ class ContainerBackend:
                 raise ContainerNotFoundError(f"Container '{container_name}' not found")
             
             if container_name not in self._blobs:
-                return [], None
+                blobs = []
+            else:
+                blobs = list(self._blobs[container_name].values())
             
-            blobs = list(self._blobs[container_name].values())
+            # Add snapshots if requested
+            if include_snapshots and container_name in self._snapshots:
+                for blob_name in self._snapshots[container_name]:
+                    for snapshot in self._snapshots[container_name][blob_name].values():
+                        blobs.append(snapshot)
             
             # Apply prefix filter
             if prefix:
                 blobs = [b for b in blobs if b.name.startswith(prefix)]
             
-            # Sort by name
-            blobs.sort(key=lambda b: b.name)
+            # Sort by name, then by snapshot_id (base blob first, then snapshots in order)
+            blobs.sort(key=lambda b: (b.name, b.snapshot_id if b.snapshot_id else ""))
             
             # Apply marker (continue from this blob name)
             if marker:
-                blobs = [b for b in blobs if b.name > marker]
+                blobs = [b for b in blobs if b.name > marker or (b.name == marker and b.snapshot_id and b.snapshot_id > marker)]
             
             # Apply max results
             next_marker = None
@@ -556,6 +571,240 @@ class ContainerBackend:
             if container_name not in self._blobs:
                 return False
             return blob_name in self._blobs[container_name]
+    
+    # ============================================================================
+    # Blob Snapshot Operations
+    # ============================================================================
+    
+    async def create_snapshot(
+        self,
+        container_name: str,
+        blob_name: str,
+    ) -> Blob:
+        """
+        Create a snapshot of a blob.
+        
+        Creates a read-only point-in-time copy of the blob with a unique
+        snapshot timestamp identifier.
+        
+        Args:
+            container_name: Container name
+            blob_name: Blob name
+            
+        Returns:
+            Snapshot blob with snapshot_id set
+            
+        Raises:
+            ContainerNotFoundError: If container not found
+            BlobNotFoundError: If blob not found
+        """
+        async with self._lock:
+            if container_name not in self._containers:
+                raise ContainerNotFoundError(f"Container '{container_name}' not found")
+            
+            if container_name not in self._blobs or blob_name not in self._blobs[container_name]:
+                raise BlobNotFoundError(f"Blob '{blob_name}' not found")
+            
+            # Get the base blob
+            base_blob = self._blobs[container_name][blob_name]
+            
+            # Create snapshot timestamp (RFC1123 format with microseconds)
+            snapshot_time = datetime.now(timezone.utc)
+            snapshot_id = snapshot_time.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            
+            # Create a copy of the blob as a snapshot
+            snapshot_blob = Blob(
+                name=blob_name,
+                container_name=container_name,
+                content=base_blob.content,
+                metadata=ContainerMetadata(metadata=dict(base_blob.metadata.metadata)),  # Deep copy metadata
+                properties=BlobProperties(
+                    etag=self._generate_etag(),
+                    last_modified=snapshot_time,
+                    content_length=base_blob.properties.content_length,
+                    content_type=base_blob.properties.content_type,
+                    content_encoding=base_blob.properties.content_encoding,
+                    content_language=base_blob.properties.content_language,
+                    content_md5=base_blob.properties.content_md5,
+                    cache_control=base_blob.properties.cache_control,
+                    content_disposition=base_blob.properties.content_disposition,
+                    blob_type=base_blob.properties.blob_type,
+                    blob_tier=base_blob.properties.blob_tier,
+                    creation_time=base_blob.properties.creation_time,
+                    is_snapshot=True,
+                    snapshot_time=snapshot_time,
+                ),
+                snapshot_id=snapshot_id,
+            )
+            
+            # Store snapshot
+            if container_name not in self._snapshots:
+                self._snapshots[container_name] = {}
+            if blob_name not in self._snapshots[container_name]:
+                self._snapshots[container_name][blob_name] = {}
+            
+            self._snapshots[container_name][blob_name][snapshot_id] = snapshot_blob
+            
+            return snapshot_blob
+    
+    async def get_blob_snapshot(
+        self,
+        container_name: str,
+        blob_name: str,
+        snapshot_id: str,
+    ) -> Blob:
+        """
+        Get a specific blob snapshot.
+        
+        Args:
+            container_name: Container name
+            blob_name: Blob name
+            snapshot_id: Snapshot identifier
+            
+        Returns:
+            Snapshot blob
+            
+        Raises:
+            ContainerNotFoundError: If container not found
+            BlobNotFoundError: If snapshot not found
+        """
+        async with self._lock:
+            if container_name not in self._containers:
+                raise ContainerNotFoundError(f"Container '{container_name}' not found")
+            
+            if (container_name not in self._snapshots or
+                blob_name not in self._snapshots[container_name] or
+                snapshot_id not in self._snapshots[container_name][blob_name]):
+                raise SnapshotNotFoundError(f"Snapshot '{snapshot_id}' for blob '{blob_name}' not found")
+            
+            return self._snapshots[container_name][blob_name][snapshot_id]
+    
+    async def list_blob_snapshots(
+        self,
+        container_name: str,
+        blob_name: str,
+    ) -> List[Blob]:
+        """
+        List all snapshots for a blob.
+        
+        Args:
+            container_name: Container name
+            blob_name: Blob name
+            
+        Returns:
+            List of snapshot blobs (sorted by snapshot time)
+            
+        Raises:
+            ContainerNotFoundError: If container not found
+        """
+        async with self._lock:
+            if container_name not in self._containers:
+                raise ContainerNotFoundError(f"Container '{container_name}' not found")
+            
+            if container_name not in self._blobs or blob_name not in self._blobs[container_name]:
+                raise BlobNotFoundError(f"Blob '{blob_name}' not found")
+            
+            if (container_name not in self._snapshots or
+                blob_name not in self._snapshots[container_name]):
+                return []
+            
+            snapshots = list(self._snapshots[container_name][blob_name].values())
+            # Sort by snapshot time (oldest first)
+            snapshots.sort(key=lambda s: s.snapshot_id if s.snapshot_id else "")
+            return snapshots
+    
+    async def delete_snapshot(
+        self,
+        container_name: str,
+        blob_name: str,
+        snapshot_id: str,
+    ) -> None:
+        """
+        Delete a specific blob snapshot.
+        
+        Args:
+            container_name: Container name
+            blob_name: Blob name
+            snapshot_id: Snapshot identifier
+            
+        Raises:
+            ContainerNotFoundError: If container not found
+            BlobNotFoundError: If snapshot not found
+        """
+        async with self._lock:
+            if container_name not in self._containers:
+                raise ContainerNotFoundError(f"Container '{container_name}' not found")
+            
+            if container_name not in self._blobs or blob_name not in self._blobs[container_name]:
+                raise BlobNotFoundError(f"Blob '{blob_name}' not found")
+            
+            if (container_name not in self._snapshots or
+                blob_name not in self._snapshots[container_name] or
+                snapshot_id not in self._snapshots[container_name][blob_name]):
+                raise SnapshotNotFoundError(f"Snapshot '{snapshot_id}' for blob '{blob_name}' not found")
+            
+            del self._snapshots[container_name][blob_name][snapshot_id]
+            
+            # Clean up empty dictionaries
+            if not self._snapshots[container_name][blob_name]:
+                del self._snapshots[container_name][blob_name]
+            if not self._snapshots[container_name]:
+                del self._snapshots[container_name]
+    
+    async def delete_blob_with_snapshots(
+        self,
+        container_name: str,
+        blob_name: str,
+        delete_snapshots: str = "include",
+        lease_id: Optional[str] = None,
+    ) -> None:
+        """
+        Delete a blob and optionally its snapshots.
+        
+        Args:
+            container_name: Container name
+            blob_name: Blob name
+            delete_snapshots: How to handle snapshots ("include", "only", or None)
+            lease_id: Lease ID if blob is leased
+            
+        Raises:
+            ContainerNotFoundError: If container not found
+            BlobNotFoundError: If blob not found
+            ValueError: If snapshots exist but delete_snapshots not specified
+        """
+        async with self._lock:
+            if container_name not in self._containers:
+                raise ContainerNotFoundError(f"Container '{container_name}' not found")
+            
+            # Check if blob exists
+            if container_name not in self._blobs or blob_name not in self._blobs[container_name]:
+                raise BlobNotFoundError(f"Blob '{blob_name}' not found")
+            
+            # Check if snapshots exist
+            has_snapshots = (container_name in self._snapshots and
+                           blob_name in self._snapshots[container_name] and
+                           len(self._snapshots[container_name][blob_name]) > 0)
+            
+            if delete_snapshots == "only":
+                # Delete only snapshots, keep base blob
+                if has_snapshots:
+                    del self._snapshots[container_name][blob_name]
+                    if not self._snapshots[container_name]:
+                        del self._snapshots[container_name]
+            elif delete_snapshots == "include":
+                # Delete both base blob and snapshots
+                if has_snapshots:
+                    del self._snapshots[container_name][blob_name]
+                    if not self._snapshots[container_name]:
+                        del self._snapshots[container_name]
+                
+                # Validate lease and delete base blob
+                self._validate_blob_lease(container_name, blob_name, lease_id)
+                del self._blobs[container_name][blob_name]
+            else:
+                # delete_snapshots is None - delete base blob only (snapshots are orphaned per AC6)
+                self._validate_blob_lease(container_name, blob_name, lease_id)
+                del self._blobs[container_name][blob_name]
     
     # ============================================================================
     # Block Blob Operations

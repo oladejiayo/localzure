@@ -24,6 +24,7 @@ from .backend import (
     LeaseIdMismatchError,
     LeaseIdMissingError,
     LeaseNotFoundError,
+    SnapshotNotFoundError,
 )
 from .models import (
     BlockListType,
@@ -348,6 +349,7 @@ async def get_container_or_list_blobs(
     delimiter: Optional[str] = Query(None),
     maxresults: Optional[int] = Query(None),
     marker: Optional[str] = Query(None),
+    include: Optional[str] = Query(None),
 ) -> Response:
     """
     Get container properties and metadata, or list blobs if restype=container&comp=list.
@@ -363,6 +365,7 @@ async def get_container_or_list_blobs(
         delimiter: Delimiter for hierarchical listing
         maxresults: Maximum results
         marker: Continuation marker
+        include: Include options (snapshots, metadata, etc.)
         
     Returns:
         200 OK with container properties in headers or blob list XML
@@ -373,12 +376,18 @@ async def get_container_or_list_blobs(
     # Handle List Blobs operation
     if restype == "container" and comp == "list":
         try:
+            # Parse include parameter
+            include_snapshots = False
+            if include and "snapshots" in include.lower():
+                include_snapshots = True
+            
             blobs, next_marker = await backend.list_blobs(
                 container_name,
                 prefix=prefix,
                 delimiter=delimiter,
                 max_results=maxresults,
                 marker=marker,
+                include_snapshots=include_snapshots,
             )
             
             # Build XML response
@@ -399,6 +408,10 @@ async def get_container_or_list_blobs(
             for blob in blobs:
                 blob_element = ET.SubElement(blobs_element, "Blob")
                 ET.SubElement(blob_element, "Name").text = blob.name
+                
+                # Add snapshot information if this is a snapshot
+                if blob.snapshot_id:
+                    ET.SubElement(blob_element, "Snapshot").text = blob.snapshot_id
                 
                 props = ET.SubElement(blob_element, "Properties")
                 ET.SubElement(props, "Content-Length").text = str(blob.properties.content_length)
@@ -761,6 +774,31 @@ async def put_blob(
                 detail=_format_error_response("InvalidHeaderValue", str(e)),
             )
     
+    # Handle snapshot operation
+    if comp == "snapshot":
+        try:
+            snapshot = await backend.create_snapshot(container_name, blob_name)
+            
+            response = Response(status_code=status.HTTP_201_CREATED)
+            response.headers["x-ms-snapshot"] = snapshot.snapshot_id if snapshot.snapshot_id else ""
+            response.headers["x-ms-request-id"] = "localzure-request-id"
+            response.headers["x-ms-version"] = "2021-08-06"
+            response.headers["ETag"] = f'"{snapshot.properties.etag}"'
+            response.headers["Last-Modified"] = snapshot.properties.last_modified.strftime('%a, %d %b %Y %H:%M:%S GMT')
+            response.headers["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+            return response
+        
+        except ContainerNotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=_format_error_response("ContainerNotFound", "Container not found"),
+            )
+        except BlobNotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=_format_error_response("BlobNotFound", "Blob not found"),
+            )
+    
     # Handle Put Block operation
     if comp == "block" and blockid:
         try:
@@ -963,6 +1001,7 @@ async def get_blob(
     container_name: str,
     blob_name: str,
     comp: Optional[str] = Query(None),
+    snapshot: Optional[str] = Query(None),
     if_match: Optional[str] = Header(None),
     if_none_match: Optional[str] = Header(None),
     if_modified_since: Optional[str] = Header(None),
@@ -978,6 +1017,7 @@ async def get_blob(
         container_name: Container name
         blob_name: Blob name
         comp: Operation component (metadata for properties only)
+        snapshot: Snapshot identifier (datetime string)
         if_match: Conditional ETag match
         if_none_match: Conditional ETag non-match
         if_modified_since: Conditional modified since
@@ -991,7 +1031,11 @@ async def get_blob(
         412 Precondition Failed: Conditions not met
     """
     try:
-        blob = await backend.get_blob(container_name, blob_name)
+        # Get blob or snapshot
+        if snapshot:
+            blob = await backend.get_blob_snapshot(container_name, blob_name, snapshot)
+        else:
+            blob = await backend.get_blob(container_name, blob_name)
         
         # Parse conditional headers
         if_modified_dt = None
@@ -1058,6 +1102,11 @@ async def get_blob(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=_format_error_response("BlobNotFound", "Blob not found"),
         )
+    except SnapshotNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_format_error_response("BlobNotFound", "Snapshot not found"),
+        )
 
 
 @router.delete(
@@ -1070,9 +1119,11 @@ async def delete_blob(
     container_name: str,
     blob_name: str,
     x_ms_lease_id: Optional[str] = Header(None, alias="x-ms-lease-id"),
+    x_ms_delete_snapshots: Optional[str] = Header(None, alias="x-ms-delete-snapshots"),
+    snapshot: Optional[str] = Query(None),
 ) -> Response:
     """
-    Delete a blob.
+    Delete a blob or snapshot.
     
     Azure REST API: DELETE https://{account}.blob.core.windows.net/{container}/{blob}
     
@@ -1080,15 +1131,37 @@ async def delete_blob(
         account_name: Storage account name
         container_name: Container name
         blob_name: Blob name
+        x_ms_lease_id: Lease ID if blob is leased
+        x_ms_delete_snapshots: How to handle snapshots ("include" or "only")
+        snapshot: Specific snapshot to delete
         
     Returns:
         202 Accepted
         
     Raises:
         404 Not Found: Container or blob not found
+        400 Bad Request: Snapshots exist but delete_snapshots not specified
     """
     try:
-        await backend.delete_blob(container_name, blob_name, lease_id=x_ms_lease_id)
+        # Delete specific snapshot
+        if snapshot:
+            await backend.delete_snapshot(container_name, blob_name, snapshot)
+        # Delete blob with snapshot handling
+        elif x_ms_delete_snapshots:
+            await backend.delete_blob_with_snapshots(
+                container_name,
+                blob_name,
+                delete_snapshots=x_ms_delete_snapshots,
+                lease_id=x_ms_lease_id
+            )
+        # Simple delete (error if snapshots exist)
+        else:
+            await backend.delete_blob_with_snapshots(
+                container_name,
+                blob_name,
+                delete_snapshots=None,
+                lease_id=x_ms_lease_id
+            )
         
         return Response(
             status_code=status.HTTP_202_ACCEPTED,
@@ -1107,6 +1180,16 @@ async def delete_blob(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=_format_error_response("BlobNotFound", "Blob not found"),
+        )
+    except SnapshotNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_format_error_response("BlobNotFound", "Snapshot not found"),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_format_error_response("SnapshotsPresent", str(e)),
         )
     except LeaseIdMissingError:
         raise HTTPException(

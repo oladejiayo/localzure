@@ -116,8 +116,26 @@ class QueueAlreadyExistsError(EntityAlreadyExistsError):
 
 class InvalidQueueNameError(InvalidEntityNameError):
     """Raised when queue name is invalid."""
+    error_code = "InvalidQueueName"
+    
     def __init__(self, queue_name: str, reason: str, message: Optional[str] = None):
         super().__init__("queue", queue_name, reason, message)
+
+
+class InvalidTopicNameError(InvalidEntityNameError):
+    """Raised when topic name is invalid."""
+    error_code = "InvalidTopicName"
+    
+    def __init__(self, topic_name: str, reason: str, message: Optional[str] = None):
+        super().__init__("topic", topic_name, reason, message)
+
+
+class InvalidSubscriptionNameError(InvalidEntityNameError):
+    """Raised when subscription name is invalid."""
+    error_code = "InvalidSubscriptionName"
+    
+    def __init__(self, subscription_name: str, reason: str, message: Optional[str] = None):
+        super().__init__("subscription", subscription_name, reason, message)
 
 
 class TopicNotFoundError(EntityNotFoundError):

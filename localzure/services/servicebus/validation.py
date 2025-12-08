@@ -24,6 +24,9 @@ from .constants import (
 )
 from .exceptions import (
     InvalidEntityNameError,
+    InvalidQueueNameError,
+    InvalidTopicNameError,
+    InvalidSubscriptionNameError,
     MessageSizeExceededError,
     InvalidOperationError,
 )
@@ -59,20 +62,13 @@ class EntityNameValidator:
         """
         Validate queue name against Azure rules.
         
-        Rules:
-        - Length: 1-260 characters
-        - Allowed: letters, numbers, periods, hyphens, underscores
-        - Cannot start/end with slash
-        - No reserved words
-        - No disallowed characters
-        
         Args:
             name: Queue name to validate
             
         Raises:
-            InvalidEntityNameError: If validation fails
+            InvalidQueueNameError: If validation fails
         """
-        cls._validate_entity_name(name, "queue", MAX_QUEUE_NAME_LENGTH, cls.QUEUE_TOPIC_PATTERN)
+        cls._validate_entity_name(name, "queue", MAX_QUEUE_NAME_LENGTH, cls.QUEUE_TOPIC_PATTERN, InvalidQueueNameError)
     
     @classmethod
     def validate_topic_name(cls, name: str) -> None:
@@ -83,27 +79,22 @@ class EntityNameValidator:
             name: Topic name to validate
             
         Raises:
-            InvalidEntityNameError: If validation fails
+            InvalidTopicNameError: If validation fails
         """
-        cls._validate_entity_name(name, "topic", MAX_TOPIC_NAME_LENGTH, cls.QUEUE_TOPIC_PATTERN)
+        cls._validate_entity_name(name, "topic", MAX_TOPIC_NAME_LENGTH, cls.QUEUE_TOPIC_PATTERN, InvalidTopicNameError)
     
     @classmethod
     def validate_subscription_name(cls, name: str) -> None:
         """
         Validate subscription name against Azure rules.
         
-        Rules:
-        - Length: 1-50 characters
-        - Allowed: letters, numbers, hyphens
-        - More restrictive than queue/topic names
-        
         Args:
             name: Subscription name to validate
             
         Raises:
-            InvalidEntityNameError: If validation fails
+            InvalidSubscriptionNameError: If validation fails
         """
-        cls._validate_entity_name(name, "subscription", MAX_SUBSCRIPTION_NAME_LENGTH, cls.SUBSCRIPTION_PATTERN)
+        cls._validate_entity_name(name, "subscription", MAX_SUBSCRIPTION_NAME_LENGTH, cls.SUBSCRIPTION_PATTERN, InvalidSubscriptionNameError)
     
     @classmethod
     def _validate_entity_name(
@@ -111,18 +102,19 @@ class EntityNameValidator:
         name: str,
         entity_type: str,
         max_length: int,
-        pattern: re.Pattern
+        pattern: re.Pattern,
+        exception_class: type = InvalidEntityNameError
     ) -> None:
         """Internal validation logic."""
         if not name:
-            raise InvalidEntityNameError(
+            raise exception_class(
                 entity_type,
                 name,
                 "Name cannot be empty"
             )
         
         if len(name) > max_length:
-            raise InvalidEntityNameError(
+            raise exception_class(
                 entity_type,
                 name,
                 f"Name exceeds maximum length of {max_length} characters"
@@ -131,7 +123,7 @@ class EntityNameValidator:
         # Check for disallowed characters
         for char in cls.DISALLOWED_CHARS:
             if char in name:
-                raise InvalidEntityNameError(
+                raise exception_class(
                     entity_type,
                     name,
                     f"Name contains disallowed character: '{char}'"
@@ -139,7 +131,7 @@ class EntityNameValidator:
         
         # Check for slashes at start/end
         if name.startswith('/') or name.endswith('/'):
-            raise InvalidEntityNameError(
+            raise exception_class(
                 entity_type,
                 name,
                 "Name cannot start or end with slash"
@@ -147,7 +139,7 @@ class EntityNameValidator:
         
         # Check pattern
         if not pattern.match(name):
-            raise InvalidEntityNameError(
+            raise exception_class(
                 entity_type,
                 name,
                 "Name must start and end with alphanumeric characters and contain only allowed characters"
@@ -155,7 +147,7 @@ class EntityNameValidator:
         
         # Check for consecutive special characters
         if '--' in name or '__' in name or '..' in name:
-            raise InvalidEntityNameError(
+            raise exception_class(
                 entity_type,
                 name,
                 "Name cannot contain consecutive hyphens, underscores, or periods"
@@ -163,7 +155,7 @@ class EntityNameValidator:
         
         # Check for reserved words (case-insensitive)
         if name.lower() in cls.RESERVED_WORDS:
-            raise InvalidEntityNameError(
+            raise exception_class(
                 entity_type,
                 name,
                 f"Name is reserved: '{name}'"

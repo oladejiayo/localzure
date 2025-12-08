@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localzure.services.servicebus.api import router, backend
+from localzure.services.servicebus.error_handlers import register_exception_handlers
 
 
 @pytest.fixture
@@ -19,6 +20,7 @@ def client():
     from fastapi import FastAPI
     app = FastAPI()
     app.include_router(router)
+    register_exception_handlers(app)
     return TestClient(app)
 
 

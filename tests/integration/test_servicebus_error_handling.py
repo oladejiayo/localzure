@@ -189,7 +189,7 @@ class TestInvalidEntityNameErrors:
         assert response.status_code == 400
         data = response.json()
         
-        assert data["error"]["code"] == "InvalidEntityName"
+        assert data["error"]["code"] == "InvalidQueueName"
         assert data["error"]["details"]["entity_type"] == "queue"
     
     def test_invalid_queue_name_special_chars(self, client):
@@ -213,7 +213,7 @@ class TestInvalidEntityNameErrors:
         assert response.status_code == 400
         data = response.json()
         
-        assert data["error"]["code"] == "InvalidEntityName"
+        assert data["error"]["code"] == "InvalidQueueName"
 
 
 class TestMessageErrors:

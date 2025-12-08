@@ -127,7 +127,7 @@ class TestEntityErrors:
         """Test InvalidQueueNameError."""
         error = InvalidQueueNameError("bad-queue", "invalid characters")
         assert isinstance(error, InvalidEntityNameError)
-        assert error.error_code == "InvalidEntityName"
+        assert error.error_code == "InvalidQueueName"
         assert error.details["entity_type"] == "queue"
         assert error.details["entity_name"] == "bad-queue"
         assert error.details["reason"] == "invalid characters"

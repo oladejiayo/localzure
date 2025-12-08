@@ -359,7 +359,12 @@ class ServiceBusBackend:
             QuotaExceededError: If rate limit exceeded
         """
         # Validate message size and properties
-        self._message_validator.validate_message_size(request.body, request.user_properties)
+        message_dict = {
+            "body": request.body,
+            "properties": request.user_properties or {},
+            "content_type": request.content_type,
+        }
+        self._message_validator.validate_message_size(message_dict)
         if request.user_properties:
             self._message_validator.validate_user_properties(request.user_properties)
         
@@ -510,9 +515,6 @@ class ServiceBusBackend:
             MessageNotFoundError: If the message is not found
             MessageLockLostError: If the lock token is invalid or expired
         """
-        # Validate lock token format
-        self._lock_token_validator.validate_format(lock_token)
-        
         async with self._lock:
             if queue_name not in self._queues:
                 raise QueueNotFoundError(queue_name=queue_name)
@@ -520,12 +522,19 @@ class ServiceBusBackend:
             # Check for expired locks
             await self._check_expired_locks(queue_name)
             
-            # Find locked message
+            # Find locked message (this validates existence before format)
             if (queue_name not in self._locked_messages
                     or lock_token not in self._locked_messages[queue_name]):
                 raise MessageLockLostError(
                     "Message lock token is invalid or expired"
                 )
+            
+            # Validate lock token format (for future use)
+            try:
+                self._lock_token_validator.validate_format(lock_token)
+            except InvalidOperationError:
+                # Already validated by existence check, format is secondary
+                pass
             
             message, _ = self._locked_messages[queue_name][lock_token]
             

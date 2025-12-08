@@ -171,36 +171,39 @@ class ServiceBusMessage(BaseModel):
     
     Represents a message in a Service Bus queue with properties and state.
     """
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='forbid', populate_by_name=True)
     
-    message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    session_id: Optional[str] = None
-    correlation_id: Optional[str] = None
-    content_type: Optional[str] = None
-    label: Optional[str] = None
-    to: Optional[str] = None
-    reply_to: Optional[str] = None
-    time_to_live: int = Field(default=1209600)  # 14 days in seconds
-    scheduled_enqueue_time_utc: Optional[datetime] = None
-    user_properties: Dict[str, str] = Field(default_factory=dict)
+    message_id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="MessageId")
+    session_id: Optional[str] = Field(default=None, alias="SessionId")
+    correlation_id: Optional[str] = Field(default=None, alias="CorrelationId")
+    content_type: Optional[str] = Field(default=None, alias="ContentType")
+    label: Optional[str] = Field(default=None, alias="Label")
+    to: Optional[str] = Field(default=None, alias="To")
+    reply_to: Optional[str] = Field(default=None, alias="ReplyTo")
+    time_to_live: int = Field(default=1209600, alias="TimeToLive")  # 14 days in seconds
+    scheduled_enqueue_time_utc: Optional[datetime] = Field(default=None, alias="ScheduledEnqueueTimeUtc")
+    user_properties: Dict[str, str] = Field(default_factory=dict, alias="UserProperties")
     
     # Message body
-    body: str = ""  # Base64 encoded
+    body: str = Field(default="", alias="Body")  # Base64 encoded
     
     # System properties
-    enqueued_time_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    sequence_number: int = 0
-    delivery_count: int = 0
-    lock_token: Optional[str] = None
-    locked_until_utc: Optional[datetime] = None
+    enqueued_time_utc: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), 
+        alias="EnqueuedTimeUtc"
+    )
+    sequence_number: int = Field(default=0, alias="SequenceNumber")
+    delivery_count: int = Field(default=0, alias="DeliveryCount")
+    lock_token: Optional[str] = Field(default=None, alias="LockToken")
+    locked_until_utc: Optional[datetime] = Field(default=None, alias="LockedUntilUtc")
     
     # Dead-letter properties
-    dead_letter_reason: Optional[str] = None
-    dead_letter_description: Optional[str] = None
+    dead_letter_reason: Optional[str] = Field(default=None, alias="DeadLetterReason")
+    dead_letter_description: Optional[str] = Field(default=None, alias="DeadLetterDescription")
     
     # State
-    is_locked: bool = False
-    is_dead_lettered: bool = False
+    is_locked: bool = Field(default=False, alias="IsLocked")
+    is_dead_lettered: bool = Field(default=False, alias="IsDeadLettered")
 
 
 class SendMessageRequest(BaseModel):

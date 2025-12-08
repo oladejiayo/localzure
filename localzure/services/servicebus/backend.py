@@ -1,7 +1,9 @@
 """
-Service Bus Backend
+Service Bus Backend.
 
 Backend implementation for Azure Service Bus queue management and message operations.
+Provides in-memory storage and operations for queues, topics, subscriptions, and messages
+with Azure-compatible behavior.
 
 Author: Ayodele Oladeji
 Date: 2025-12-05
@@ -12,6 +14,13 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 
+from .constants import (
+    MAX_QUEUES,
+    MAX_TOPICS,
+    DEFAULT_MESSAGE_TTL,
+    DEFAULT_LOCK_DURATION,
+)
+from .filter_evaluator import SqlFilterEvaluator
 from .logging_utils import StructuredLogger, track_operation_time
 from .models import (
     QueueDescription,
@@ -54,34 +63,59 @@ from .exceptions import (
 
 class ServiceBusBackend:
     """
-    Backend for Service Bus queue management operations.
+    Backend for Service Bus operations.
     
-    This class manages Service Bus queues in memory, providing
-    create, read, update, delete operations with Azure-compatible behavior.
+    Manages Service Bus entities (queues, topics, subscriptions) in memory,
+    providing Azure-compatible CRUD operations and message handling.
+    
+    Attributes:
+        _queues: Dictionary mapping queue names to QueueDescription objects
+        _messages: Dictionary mapping queue names to message lists
+        _topics: Dictionary mapping topic names to TopicDescription objects  
+        _subscriptions: Dictionary mapping (topic, subscription) to descriptions
+        _lock: Asyncio lock for thread-safe operations
+        _logger: Structured logger instance
+        _filter_evaluator: SQL filter evaluator for subscription filters
     """
     
     def __init__(self):
-        """Initialize the Service Bus backend."""
+        """Initialize the Service Bus backend with empty storage."""
         # Queue storage
         self._queues: Dict[str, QueueDescription] = {}
-        self._messages: Dict[str, List[ServiceBusMessage]] = {}  # Queue name -> list of messages
-        self._dead_letter_messages: Dict[str, List[ServiceBusMessage]] = {}  # Queue name -> dead-letter messages
-        self._locked_messages: Dict[str, Dict[str, Tuple[ServiceBusMessage, datetime]]] = {}  # Queue -> {lock_token -> (message, locked_until)}
-        self._sequence_counters: Dict[str, int] = {}  # Queue name -> next sequence number
+        self._messages: Dict[str, List[ServiceBusMessage]] = {}
+        self._dead_letter_messages: Dict[str, List[ServiceBusMessage]] = {}
+        self._locked_messages: Dict[
+            str,
+            Dict[str, Tuple[ServiceBusMessage, datetime]]
+        ] = {}
+        self._sequence_counters: Dict[str, int] = {}
         
         # Topic and subscription storage
-        self._topics: Dict[str, TopicDescription] = {}  # Topic name -> TopicDescription
-        self._subscriptions: Dict[Tuple[str, str], SubscriptionDescription] = {}  # (topic_name, sub_name) -> SubscriptionDescription
-        self._subscription_messages: Dict[Tuple[str, str], List[ServiceBusMessage]] = {}  # (topic, sub) -> messages
-        self._subscription_locked: Dict[Tuple[str, str], Dict[str, Tuple[ServiceBusMessage, datetime]]] = {}  # (topic, sub) -> {lock_token -> (message, locked_until)}
-        self._subscription_dead_letter: Dict[Tuple[str, str], List[ServiceBusMessage]] = {}  # (topic, sub) -> dead-letter messages
+        self._topics: Dict[str, TopicDescription] = {}
+        self._subscriptions: Dict[
+            Tuple[str, str],
+            SubscriptionDescription
+        ] = {}
+        self._subscription_messages: Dict[
+            Tuple[str, str],
+            List[ServiceBusMessage]
+        ] = {}
+        self._subscription_locked: Dict[
+            Tuple[str, str],
+            Dict[str, Tuple[ServiceBusMessage, datetime]]
+        ] = {}
+        self._subscription_dead_letter: Dict[
+            Tuple[str, str],
+            List[ServiceBusMessage]
+        ] = {}
         
         self._lock = asyncio.Lock()
-        self._max_queues = 100  # Quota limit
-        self._max_topics = 100  # Quota limit for topics
+        self._max_queues = MAX_QUEUES
+        self._max_topics = MAX_TOPICS
         
-        # Initialize structured logger
+        # Initialize components
         self._logger = StructuredLogger('localzure.services.servicebus.backend')
+        self._filter_evaluator = SqlFilterEvaluator()
     
     async def create_queue(
         self,
@@ -343,8 +377,7 @@ class ServiceBusBackend:
     async def receive_message(
         self,
         queue_name: str,
-        mode: str = ReceiveMode.PEEK_LOCK,
-        timeout: int = 60
+        mode: str = ReceiveMode.PEEK_LOCK
     ) -> Optional[ServiceBusMessage]:
         """
         Receive a message from a Service Bus queue.
@@ -352,7 +385,6 @@ class ServiceBusBackend:
         Args:
             queue_name: Name of the queue
             mode: Receive mode (PeekLock or ReceiveAndDelete)
-            timeout: Timeout in seconds
             
         Returns:
             A message if available, None otherwise
@@ -438,10 +470,13 @@ class ServiceBusBackend:
             await self._check_expired_locks(queue_name)
             
             # Find locked message
-            if queue_name not in self._locked_messages or lock_token not in self._locked_messages[queue_name]:
-                raise MessageLockLostError("Message lock token is invalid or expired")
+            if (queue_name not in self._locked_messages
+                    or lock_token not in self._locked_messages[queue_name]):
+                raise MessageLockLostError(
+                    "Message lock token is invalid or expired"
+                )
             
-            message, locked_until = self._locked_messages[queue_name][lock_token]
+            message, _ = self._locked_messages[queue_name][lock_token]
             
             if message.message_id != message_id:
                 raise MessageNotFoundError("Message ID does not match lock token", queue_name)
@@ -1242,7 +1277,7 @@ class ServiceBusBackend:
     
     def _evaluate_correlation_filter(
         self,
-        filter: SubscriptionFilter,
+        filter_obj: SubscriptionFilter,
         message: ServiceBusMessage
     ) -> bool:
         """
@@ -1252,205 +1287,69 @@ class ServiceBusBackend:
         If a filter property is None, it's not checked.
         
         Args:
-            filter: Correlation filter
+            filter_obj: Correlation filter
             message: Message to evaluate
             
         Returns:
             bool: True if message matches filter
         """
         # Check standard properties
-        if filter.correlation_id is not None and message.correlation_id != filter.correlation_id:
+        if (filter_obj.correlation_id is not None
+                and message.correlation_id != filter_obj.correlation_id):
             return False
         
-        if filter.content_type is not None and message.content_type != filter.content_type:
+        if (filter_obj.content_type is not None
+                and message.content_type != filter_obj.content_type):
             return False
         
-        if filter.label is not None and message.label != filter.label:
+        if filter_obj.label is not None and message.label != filter_obj.label:
             return False
         
-        if filter.message_id is not None and message.message_id != filter.message_id:
+        if (filter_obj.message_id is not None
+                and message.message_id != filter_obj.message_id):
             return False
         
-        if filter.reply_to is not None and message.reply_to != filter.reply_to:
+        if (filter_obj.reply_to is not None
+                and message.reply_to != filter_obj.reply_to):
             return False
         
-        if filter.session_id is not None and message.session_id != filter.session_id:
+        if (filter_obj.session_id is not None
+                and message.session_id != filter_obj.session_id):
             return False
         
-        if filter.to is not None and message.to != filter.to:
+        if filter_obj.to is not None and message.to != filter_obj.to:
             return False
         
         # Check user properties
-        if filter.properties:
+        if filter_obj.properties:
             if message.user_properties is None:
                 return False
             
-            for key, value in filter.properties.items():
-                if key not in message.user_properties or message.user_properties[key] != value:
+            for key, value in filter_obj.properties.items():
+                if (key not in message.user_properties
+                        or message.user_properties[key] != value):
                     return False
         
         return True
     
     def _evaluate_sql_filter(
         self,
-        filter: SubscriptionFilter,
+        filter_obj: SubscriptionFilter,
         message: ServiceBusMessage
     ) -> bool:
         """
         Evaluate SQL filter expression against a message.
         
-        Supports basic SQL92 subset:
-        - Property comparisons: sys.Label = 'value', quantity > 100
-        - Logical operators: AND, OR
-        - IN operator: color IN ('red', 'blue')
-        - Comparison operators: =, !=, <>, <, >, <=, >=
+        Delegates to SqlFilterEvaluator for actual evaluation logic.
         
         Args:
-            filter: SQL filter
+            filter_obj: SQL filter
             message: Message to evaluate
             
         Returns:
-            bool: True if message matches filter
+            True if message matches filter
         """
-        if not filter.sql_expression:
-            return True
-        
-        # Simple SQL expression parser
-        # This is a basic implementation - a production version would use a proper parser
-        expression = filter.sql_expression.strip()
-        
-        # Get message properties for evaluation
-        context = {
-            'sys': {
-                'Label': message.label,
-                'MessageId': message.message_id,
-                'ContentType': message.content_type,
-                'CorrelationId': message.correlation_id,
-                'To': message.to,
-                'ReplyTo': message.reply_to,
-                'SessionId': message.session_id,
-            }
-        }
-        
-        # Add user properties
-        if message.user_properties:
-            context.update(message.user_properties)
-        
-        try:
-            # Evaluate the expression
-            return self._evaluate_sql_expression(expression, context)
-        except Exception:
-            # If evaluation fails, don't match
-            return False
-    
-    def _evaluate_sql_expression(self, expression: str, context: dict) -> bool:
-        """
-        Evaluate a SQL filter expression.
-        
-        Args:
-            expression: SQL expression
-            context: Property values
-            
-        Returns:
-            bool: Evaluation result
-        """
-        # Handle OR operator (lowest precedence)
-        if ' OR ' in expression.upper():
-            parts = expression.split(' OR ', 1)
-            left = self._evaluate_sql_expression(parts[0].strip(), context)
-            right = self._evaluate_sql_expression(parts[1].strip(), context)
-            return left or right
-        
-        # Handle AND operator
-        if ' AND ' in expression.upper():
-            parts = expression.split(' AND ', 1)
-            left = self._evaluate_sql_expression(parts[0].strip(), context)
-            right = self._evaluate_sql_expression(parts[1].strip(), context)
-            return left and right
-        
-        # Handle IN operator
-        if ' IN ' in expression.upper():
-            return self._evaluate_in_expression(expression, context)
-        
-        # Handle comparison operators
-        for op in ['>=', '<=', '<>', '!=', '=', '<', '>']:
-            if op in expression:
-                return self._evaluate_comparison(expression, op, context)
-        
-        return False
-    
-    def _evaluate_in_expression(self, expression: str, context: dict) -> bool:
-        """Evaluate IN expression like: color IN ('red', 'blue')"""
-        # Find IN operator position (case-insensitive)
-        in_pos = expression.upper().find(' IN ')
-        if in_pos == -1:
-            return False
-        
-        property_name = expression[:in_pos].strip()
-        values_str = expression[in_pos + 4:].strip()
-        
-        # Extract values from parentheses
-        if not (values_str.startswith('(') and values_str.endswith(')')):
-            return False
-        
-        values_str = values_str[1:-1]  # Remove parentheses
-        values = [v.strip().strip("'\"") for v in values_str.split(',')]
-        
-        # Get property value
-        prop_value = self._get_property_value(property_name, context)
-        if prop_value is None:
-            return False
-        
-        return str(prop_value) in values
-    
-    def _evaluate_comparison(self, expression: str, operator: str, context: dict) -> bool:
-        """Evaluate comparison expression like: quantity > 100"""
-        parts = expression.split(operator, 1)
-        if len(parts) != 2:
-            return False
-        
-        left = parts[0].strip()
-        right = parts[1].strip().strip("'\"")
-        
-        # Get left property value
-        left_value = self._get_property_value(left, context)
-        if left_value is None:
-            return False
-        
-        # Try to convert right to number if possible
-        try:
-            right_value = float(right)
-            left_value = float(left_value)
-        except (ValueError, TypeError):
-            right_value = right
-            left_value = str(left_value)
-        
-        # Perform comparison
-        if operator == '=':
-            return left_value == right_value
-        elif operator in ['!=', '<>']:
-            return left_value != right_value
-        elif operator == '<':
-            return left_value < right_value
-        elif operator == '>':
-            return left_value > right_value
-        elif operator == '<=':
-            return left_value <= right_value
-        elif operator == '>=':
-            return left_value >= right_value
-        
-        return False
-    
-    def _get_property_value(self, property_name: str, context: dict):
-        """Get property value from context."""
-        # Handle sys.PropertyName
-        if '.' in property_name:
-            parts = property_name.split('.', 1)
-            if parts[0] in context and isinstance(context[parts[0]], dict):
-                return context[parts[0]].get(parts[1])
-        
-        # Direct property
-        return context.get(property_name)
+        return self._filter_evaluator.evaluate(filter_obj, message)
     
     def _message_matches_subscription(
         self,
@@ -1474,22 +1373,22 @@ class ServiceBusBackend:
         
         # Check each rule - if any matches, the message is accepted
         for rule in subscription.rules:
-            filter = rule.filter
+            rule_filter = rule.filter
             
-            if filter.filter_type == FilterType.TRUE_FILTER:
+            if rule_filter.filter_type == FilterType.TRUE_FILTER:
                 if self._evaluate_true_filter(message):
                     return True
             
-            elif filter.filter_type == FilterType.FALSE_FILTER:
+            elif rule_filter.filter_type == FilterType.FALSE_FILTER:
                 if self._evaluate_false_filter(message):
                     return True
             
-            elif filter.filter_type == FilterType.CORRELATION_FILTER:
-                if self._evaluate_correlation_filter(filter, message):
+            elif rule_filter.filter_type == FilterType.CORRELATION_FILTER:
+                if self._evaluate_correlation_filter(rule_filter, message):
                     return True
             
-            elif filter.filter_type == FilterType.SQL_FILTER:
-                if self._evaluate_sql_filter(filter, message):
+            elif rule_filter.filter_type == FilterType.SQL_FILTER:
+                if self._evaluate_sql_filter(rule_filter, message):
                     return True
         
         return False
@@ -1599,7 +1498,6 @@ class ServiceBusBackend:
         subscription_name: str,
         mode: ReceiveMode = ReceiveMode.PEEK_LOCK,
         max_messages: int = 1,
-        timeout: Optional[int] = None,
     ) -> List[ServiceBusMessage]:
         """
         Receive messages from a subscription.
@@ -1609,10 +1507,9 @@ class ServiceBusBackend:
             subscription_name: Subscription name
             mode: Receive mode (PEEK_LOCK or RECEIVE_AND_DELETE)
             max_messages: Maximum number of messages to receive
-            timeout: Timeout in seconds
             
         Returns:
-            List[ServiceBusMessage]: Received messages
+            List of received messages (up to max_messages)
             
         Raises:
             SubscriptionNotFoundError: If subscription not found

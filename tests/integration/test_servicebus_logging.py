@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localzure.services.servicebus.api import router, backend
+from localzure.services.servicebus.error_handlers import register_exception_handlers
 from localzure.services.servicebus.middleware import CorrelationMiddleware
 from localzure.services.servicebus.logging_utils import StructuredFormatter, CorrelationContext
 

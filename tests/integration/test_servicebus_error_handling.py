@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from localzure.services.servicebus.api import router, backend
 from localzure.services.servicebus.error_handlers import register_exception_handlers
+from localzure.services.servicebus.error_handlers import register_exception_handlers
 
 
 @pytest.fixture(autouse=True, scope="function")

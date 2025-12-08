@@ -1,17 +1,20 @@
 """
-Service Bus API Endpoints
+Service Bus API Endpoints.
 
 FastAPI endpoints for Azure Service Bus Management API.
+Provides HTTP/REST endpoints for queue, topic, subscription, and message operations.
 
 Author: Ayodele Oladeji
 Date: 2025-12-05
 """
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from typing import Optional
 import xml.etree.ElementTree as ET
 
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+
+from .constants import XML_DECLARATION, XML_MEDIA_TYPE
 from .logging_utils import StructuredLogger
 from .exceptions import (
     QueueAlreadyExistsError,
@@ -146,7 +149,7 @@ def _format_error_response(code: str, message: str) -> str:
     ET.SubElement(root, "Code").text = code
     ET.SubElement(root, "Detail").text = message
     
-    return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")
+    return XML_DECLARATION + ET.tostring(root, encoding="unicode")
 
 
 def _parse_queue_properties_from_xml(xml_content: str) -> QueueProperties:
@@ -518,7 +521,7 @@ async def send_message(
     try:
         message = await backend.send_message(queue_name, request)
         
-        return message.model_dump(mode="json")
+        return message.model_dump(mode="json", by_alias=True)
         
     except QueueNotFoundError:
         # Let exception handler convert to JSON error response
@@ -527,36 +530,31 @@ async def send_message(
 
 @router.post("/{namespace}/{queue_name}/messages/head")
 async def receive_message(
-    namespace: str,
     queue_name: str,
     mode: str = Query(default=ReceiveMode.PEEK_LOCK, description="Receive mode: PeekLock or ReceiveAndDelete"),
-    timeout: int = Query(default=60, ge=1, le=300, description="Timeout in seconds"),
 ) -> Optional[dict]:
     """
     Receive a message from a Service Bus queue.
     
     Args:
-        namespace: Service Bus namespace
         queue_name: Queue name
         mode: Receive mode (PeekLock or ReceiveAndDelete)
-        timeout: Timeout in seconds
         
     Returns:
         Message if available, None otherwise
         
     Raises:
-        404 Not Found: Queue not found
+        QueueNotFoundError: If queue not found
     """
     try:
-        message = await backend.receive_message(queue_name, mode, timeout)
+        message = await backend.receive_message(queue_name, mode)
         
         if message is None:
             return None
         
-        return message.model_dump(mode="json")
+        return message.model_dump(mode="json", by_alias=True)
         
     except QueueNotFoundError:
-        # Let exception handler convert to JSON error response
         raise
 
 
@@ -985,35 +983,77 @@ async def send_to_topic(namespace: str, topic_name: str, request: SendMessageReq
 
 @router.post("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}/messages/head")
 async def receive_from_subscription(
-    namespace: str, topic_name: str, subscription_name: str,
+    topic_name: str, 
+    subscription_name: str,
     num_of_messages: int = Query(default=1, alias="numofmessages"),
     timeout: int = Query(default=60),
     mode: str = Query(default="peeklock"),
 ):
-    """Receive messages from a subscription."""
-    try:
-        receive_mode = ReceiveMode.PEEK_LOCK if mode.lower() == "peeklock" else ReceiveMode.RECEIVE_AND_DELETE
+    """
+    Receive messages from a subscription.
+    
+    Args:
+        topic_name: Name of the topic
+        subscription_name: Name of the subscription
+        num_of_messages: Maximum number of messages to receive
+        timeout: Receive timeout in seconds
+        mode: Receive mode ('peeklock' or 'receiveanddelete')
         
-        messages = await backend.receive_from_subscription(topic_name, subscription_name, receive_mode, num_of_messages, timeout)
+    Returns:
+        List of messages or 204 No Content if no messages available
+        
+    Raises:
+        SubscriptionNotFoundError: If subscription doesn't exist
+    """
+    try:
+        receive_mode = (
+            ReceiveMode.PEEK_LOCK 
+            if mode.lower() == "peeklock" 
+            else ReceiveMode.RECEIVE_AND_DELETE
+        )
+        
+        messages = await backend.receive_from_subscription(
+            topic_name, 
+            subscription_name, 
+            receive_mode, 
+            num_of_messages
+        )
         
         if not messages:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
         
-        return [msg.model_dump(mode="json") for msg in messages]
+        return [msg.model_dump(mode="json", by_alias=True) for msg in messages]
     except SubscriptionNotFoundError:
-        # Let exception handler convert to JSON error response
         raise
 
 
 @router.delete("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}/messages/{message_id}/{lock_token}")
-async def complete_subscription_message(namespace: str, topic_name: str, subscription_name: str, message_id: str, lock_token: str):
-    """Complete a subscription message (remove from queue)."""
+async def complete_subscription_message(
+    topic_name: str, 
+    subscription_name: str, 
+    lock_token: str
+):
+    """
+    Complete a subscription message (remove from queue).
+    
+    Args:
+        topic_name: Name of the topic
+        subscription_name: Name of the subscription
+        lock_token: Lock token for the message
+        
+    Returns:
+        200 OK response
+        
+    Raises:
+        SubscriptionNotFoundError: If subscription doesn't exist
+        MessageLockLostError: If message lock has expired
+    """
     try:
-        await backend.complete_subscription_message(topic_name, subscription_name, lock_token)
+        await backend.complete_subscription_message(
+            topic_name, 
+            subscription_name, 
+            lock_token
+        )
         return Response(status_code=status.HTTP_200_OK)
-    except SubscriptionNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-    except MessageLockLostError:
-        # Let exception handler convert to JSON error response
+    except (SubscriptionNotFoundError, MessageLockLostError):
         raise

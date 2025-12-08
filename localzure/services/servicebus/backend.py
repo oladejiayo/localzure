@@ -19,9 +19,19 @@ from .constants import (
     MAX_TOPICS,
     DEFAULT_MESSAGE_TTL,
     DEFAULT_LOCK_DURATION,
+    MAX_SUBSCRIPTIONS_PER_TOPIC,
 )
 from .filter_evaluator import SqlFilterEvaluator
 from .logging_utils import StructuredLogger, track_operation_time
+from .validation import (
+    EntityNameValidator,
+    MessageValidator,
+    SqlFilterSanitizer,
+    LockTokenValidator,
+    SessionIdValidator,
+)
+from .rate_limiter import ServiceBusRateLimiter
+from .audit_logger import AuditLogger
 from .models import (
     QueueDescription,
     QueueProperties,
@@ -116,6 +126,15 @@ class ServiceBusBackend:
         # Initialize components
         self._logger = StructuredLogger('localzure.services.servicebus.backend')
         self._filter_evaluator = SqlFilterEvaluator()
+        
+        # Initialize validators and rate limiter
+        self._entity_validator = EntityNameValidator()
+        self._message_validator = MessageValidator()
+        self._sql_sanitizer = SqlFilterSanitizer()
+        self._lock_token_validator = LockTokenValidator()
+        self._session_validator = SessionIdValidator()
+        self._rate_limiter = ServiceBusRateLimiter()
+        self._audit_logger = AuditLogger()
     
     async def create_queue(
         self,
@@ -137,6 +156,9 @@ class ServiceBusBackend:
             QuotaExceededError: Maximum queue count exceeded
             InvalidQueueNameError: Queue name is invalid
         """
+        # Validate queue name
+        self._entity_validator.validate_queue_name(name)
+        
         async with self._lock:
             # Check quota
             if len(self._queues) >= self._max_queues:
@@ -166,6 +188,15 @@ class ServiceBusBackend:
             # Store queue and initialize message storage
             self._queues[name] = queue
             self._messages[name] = []
+            
+            # Audit log
+            self._audit_logger.log_queue_created(
+                queue_name=name,
+                properties={
+                    "lock_duration": properties.lock_duration if properties else 60,
+                    "max_delivery_count": properties.max_delivery_count if properties else 10
+                }
+            )
             
             self._logger.log_operation(
                 operation="queue_created",
@@ -263,6 +294,9 @@ class ServiceBusBackend:
             # Delete queue and all messages
             del self._queues[name]
             del self._messages[name]
+            
+            # Audit log
+            self._audit_logger.log_queue_deleted(queue_name=name)
     
     async def get_queue_count(self) -> int:
         """
@@ -321,7 +355,21 @@ class ServiceBusBackend:
             
         Raises:
             QueueNotFoundError: If the queue does not exist
+            MessageSizeExceededError: If message exceeds size limit
+            QuotaExceededError: If rate limit exceeded
         """
+        # Validate message size and properties
+        self._message_validator.validate_message_size(request.body, request.user_properties)
+        if request.user_properties:
+            self._message_validator.validate_user_properties(request.user_properties)
+        
+        # Validate session ID if provided
+        if request.session_id:
+            self._session_validator.validate(request.session_id)
+        
+        # Check rate limit
+        await self._rate_limiter.check_queue_rate(queue_name)
+        
         async with self._lock:
             if queue_name not in self._queues:
                 raise QueueNotFoundError(queue_name=queue_name)
@@ -462,6 +510,9 @@ class ServiceBusBackend:
             MessageNotFoundError: If the message is not found
             MessageLockLostError: If the lock token is invalid or expired
         """
+        # Validate lock token format
+        self._lock_token_validator.validate_format(lock_token)
+        
         async with self._lock:
             if queue_name not in self._queues:
                 raise QueueNotFoundError(queue_name=queue_name)
@@ -799,7 +850,11 @@ class ServiceBusBackend:
         Raises:
             TopicAlreadyExistsError: If topic already exists
             QuotaExceededError: If max topics reached
+            InvalidEntityNameError: If topic name is invalid
         """
+        # Validate topic name
+        self._entity_validator.validate_topic_name(name)
+        
         async with self._lock:
             if name in self._topics:
                 raise TopicAlreadyExistsError(f"Topic '{name}' already exists")
@@ -935,10 +990,25 @@ class ServiceBusBackend:
         Raises:
             TopicNotFoundError: If parent topic not found
             SubscriptionAlreadyExistsError: If subscription already exists
+            InvalidEntityNameError: If subscription name is invalid
+            QuotaExceededError: If max subscriptions per topic exceeded
         """
+        # Validate subscription name
+        self._entity_validator.validate_subscription_name(subscription_name)
+        
         async with self._lock:
             if topic_name not in self._topics:
                 raise TopicNotFoundError(f"Topic '{topic_name}' not found")
+            
+            # Check subscription count for this topic
+            existing_subs = [s for (t, _), s in self._subscriptions.items() if t == topic_name]
+            if len(existing_subs) >= MAX_SUBSCRIPTIONS_PER_TOPIC:
+                raise QuotaExceededError(
+                    "subscription_count",
+                    len(existing_subs),
+                    MAX_SUBSCRIPTIONS_PER_TOPIC,
+                    entity_name=topic_name
+                )
             
             key = (topic_name, subscription_name)
             if key in self._subscriptions:
@@ -1134,7 +1204,12 @@ class ServiceBusBackend:
         Raises:
             SubscriptionNotFoundError: If subscription not found
             RuleAlreadyExistsError: If rule already exists
+            InvalidOperationError: If SQL filter contains dangerous keywords
         """
+        # Validate SQL filter if present
+        if filter.filter_type == FilterType.SQL_FILTER and filter.sql_expression:
+            self._sql_sanitizer.validate_sql_filter(filter.sql_expression)
+        
         async with self._lock:
             key = (topic_name, subscription_name)
             if key not in self._subscriptions:

@@ -32,6 +32,8 @@ from .exceptions import (
 )
 from .error_handlers import register_exception_handlers
 from .backend import ServiceBusBackend
+from .health_check import init_health_check
+from .metrics import get_metrics
 from .models import (
     CreateQueueRequest,
     UpdateQueueRequest,
@@ -54,12 +56,28 @@ from .models import (
 backend = ServiceBusBackend()
 logger = StructuredLogger('localzure.services.servicebus.api')
 
+# Initialize health check
+health_check = init_health_check(backend)
+
+# Get metrics instance
+metrics = get_metrics()
+
 # Create router
 router = APIRouter(prefix="/servicebus", tags=["service-bus"])
 
 # Note: Exception handlers must be registered at the FastAPI app level,
 # not the router level. Call register_exception_handlers(app) when
 # including this router in your FastAPI app.
+
+
+async def startup_event():
+    """Start background tasks on application startup."""
+    await backend.start_metrics_collection()
+
+
+async def shutdown_event():
+    """Stop background tasks on application shutdown."""
+    await backend.stop_metrics_collection()
 
 
 def _parse_iso_duration(duration_str: str) -> int:
@@ -1057,3 +1075,68 @@ async def complete_subscription_message(
         return Response(status_code=status.HTTP_200_OK)
     except (SubscriptionNotFoundError, MessageLockLostError):
         raise
+
+
+@router.get("/metrics", include_in_schema=False)
+async def get_metrics_endpoint():
+    """
+    Get Prometheus metrics.
+    
+    Returns:
+        Prometheus metrics in text format
+    """
+    metrics_output = metrics.generate_metrics()
+    return Response(
+        content=metrics_output,
+        media_type=metrics.get_content_type()
+    )
+
+
+@router.get("/health")
+async def get_health():
+    """
+    Get overall service health status.
+    
+    Returns:
+        JSON with health status, version, uptime, and dependency checks
+    """
+    import json
+    health_status = await health_check.get_health_status()
+    status_code = status.HTTP_200_OK if health_status["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
+    return Response(
+        content=json.dumps(health_status),
+        status_code=status_code,
+        media_type="application/json"
+    )
+
+
+@router.get("/health/ready")
+async def get_readiness():
+    """
+    Readiness probe for Kubernetes.
+    
+    Returns:
+        200 if service is ready to accept traffic
+        503 if service is not ready
+    """
+    is_ready = await health_check.is_ready()
+    if is_ready:
+        return Response(status_code=status.HTTP_200_OK, content="Ready")
+    else:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content="Not Ready")
+
+
+@router.get("/health/live")
+async def get_liveness():
+    """
+    Liveness probe for Kubernetes.
+    
+    Returns:
+        200 if service is alive and responsive
+        503 if service is dead
+    """
+    is_alive = await health_check.is_alive()
+    if is_alive:
+        return Response(status_code=status.HTTP_200_OK, content="Alive")
+    else:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content="Dead")

@@ -32,6 +32,7 @@ from .validation import (
 )
 from .rate_limiter import ServiceBusRateLimiter
 from .audit_logger import AuditLogger
+from .metrics import get_metrics
 from .models import (
     QueueDescription,
     QueueProperties,
@@ -135,6 +136,75 @@ class ServiceBusBackend:
         self._session_validator = SessionIdValidator()
         self._rate_limiter = ServiceBusRateLimiter()
         self._audit_logger = AuditLogger()
+        self._metrics = get_metrics()
+        
+        # Start background metrics collection
+        self._metrics_task = None
+        self._metrics_running = False
+    
+    async def start_metrics_collection(self):
+        """Start background metrics collection task."""
+        if not self._metrics_running:
+            self._metrics_running = True
+            self._metrics_task = asyncio.create_task(self._collect_metrics_loop())
+    
+    async def stop_metrics_collection(self):
+        """Stop background metrics collection task."""
+        self._metrics_running = False
+        if self._metrics_task:
+            self._metrics_task.cancel()
+            try:
+                await self._metrics_task
+            except asyncio.CancelledError:
+                pass
+    
+    async def _collect_metrics_loop(self):
+        """Background task to collect gauge metrics every 10 seconds."""
+        while self._metrics_running:
+            try:
+                await asyncio.sleep(10)
+                await self._collect_gauge_metrics()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.log_error(
+                    operation="metrics_collection",
+                    error_type=type(e).__name__,
+                    error_message=str(e)
+                )
+    
+    async def _collect_gauge_metrics(self):
+        """Collect and update all gauge metrics."""
+        async with self._lock:
+            # Update queue metrics
+            for queue_name, messages in self._messages.items():
+                active_count = len([m for m in messages if not m.scheduled_enqueue_time_utc or m.scheduled_enqueue_time_utc <= datetime.now(timezone.utc)])
+                scheduled_count = len([m for m in messages if m.scheduled_enqueue_time_utc and m.scheduled_enqueue_time_utc > datetime.now(timezone.utc)])
+                deadletter_count = len(self._dead_letter_messages.get(queue_name, []))
+                lock_count = len(self._locked_messages.get(queue_name, {}))
+                
+                self._metrics.update_active_messages('queue', queue_name, active_count)
+                self._metrics.update_scheduled_messages('queue', queue_name, scheduled_count)
+                self._metrics.update_deadletter_messages('queue', queue_name, deadletter_count)
+                self._metrics.update_active_locks('queue', queue_name, lock_count)
+            
+            # Update topic/subscription metrics
+            for (topic_name, sub_name), messages in self._subscription_messages.items():
+                active_count = len([m for m in messages if not m.scheduled_enqueue_time_utc or m.scheduled_enqueue_time_utc <= datetime.now(timezone.utc)])
+                scheduled_count = len([m for m in messages if m.scheduled_enqueue_time_utc and m.scheduled_enqueue_time_utc > datetime.now(timezone.utc)])
+                deadletter_count = len(self._subscription_dead_letter.get((topic_name, sub_name), []))
+                lock_count = len(self._subscription_locked.get((topic_name, sub_name), {}))
+                
+                entity_name = f"{topic_name}/{sub_name}"
+                self._metrics.update_active_messages('subscription', entity_name, active_count)
+                self._metrics.update_scheduled_messages('subscription', entity_name, scheduled_count)
+                self._metrics.update_deadletter_messages('subscription', entity_name, deadletter_count)
+                self._metrics.update_active_locks('subscription', entity_name, lock_count)
+            
+            # Update entity counts
+            self._metrics.update_entity_count('queue', len(self._queues))
+            self._metrics.update_entity_count('topic', len(self._topics))
+            self._metrics.update_entity_count('subscription', len(self._subscriptions))
     
     async def create_queue(
         self,
@@ -358,32 +428,36 @@ class ServiceBusBackend:
             MessageSizeExceededError: If message exceeds size limit
             QuotaExceededError: If rate limit exceeded
         """
-        # Validate message size and properties
-        message_dict = {
-            "body": request.body,
-            "properties": request.user_properties or {},
-            "content_type": request.content_type,
-        }
-        self._message_validator.validate_message_size(message_dict)
-        if request.user_properties:
-            self._message_validator.validate_user_properties(request.user_properties)
+        import time
+        start_time = time.perf_counter()
         
-        # Validate session ID if provided
-        if request.session_id:
-            self._session_validator.validate(request.session_id)
-        
-        # Check rate limit
-        await self._rate_limiter.check_queue_rate(queue_name)
-        
-        async with self._lock:
-            if queue_name not in self._queues:
-                raise QueueNotFoundError(queue_name=queue_name)
+        try:
+            # Validate message size and properties
+            message_dict = {
+                "body": request.body,
+                "properties": request.user_properties or {},
+                "content_type": request.content_type,
+            }
+            self._message_validator.validate_message_size(message_dict)
+            if request.user_properties:
+                self._message_validator.validate_user_properties(request.user_properties)
             
-            queue = self._queues[queue_name]
+            # Validate session ID if provided
+            if request.session_id:
+                self._session_validator.validate(request.session_id)
             
-            # Get next sequence number
-            if queue_name not in self._sequence_counters:
-                self._sequence_counters[queue_name] = 1
+            # Check rate limit
+            await self._rate_limiter.check_queue_rate(queue_name)
+            
+            async with self._lock:
+                if queue_name not in self._queues:
+                    raise QueueNotFoundError(queue_name=queue_name)
+                
+                queue = self._queues[queue_name]
+                
+                # Get next sequence number
+                if queue_name not in self._sequence_counters:
+                    self._sequence_counters[queue_name] = 1
             sequence_number = self._sequence_counters[queue_name]
             self._sequence_counters[queue_name] += 1
             
@@ -425,7 +499,16 @@ class ServiceBusBackend:
                 session_id=message.session_id
             )
             
+            # Track metrics
+            duration = time.perf_counter() - start_time
+            message_size = len(message.body.encode('utf-8')) if message.body else 0
+            self._metrics.track_message_sent('queue', queue_name, message_size, duration)
+            
             return message
+        except Exception as e:
+            # Track error
+            self._metrics.track_error('send_message', type(e).__name__)
+            raise
     
     async def receive_message(
         self,
@@ -445,56 +528,68 @@ class ServiceBusBackend:
         Raises:
             QueueNotFoundError: If the queue does not exist
         """
-        async with self._lock:
-            if queue_name not in self._queues:
-                raise QueueNotFoundError(queue_name=queue_name)
-            
-            # Check for expired locks and return them to queue
-            await self._check_expired_locks(queue_name)
-            
-            if queue_name not in self._messages or not self._messages[queue_name]:
-                return None
-            
-            # Get first available message
-            message = self._messages[queue_name][0]
-            
-            if mode == ReceiveMode.RECEIVE_AND_DELETE:
-                # Remove message immediately
+        import time
+        start_time = time.perf_counter()
+        
+        try:
+            async with self._lock:
+                if queue_name not in self._queues:
+                    raise QueueNotFoundError(queue_name=queue_name)
+                
+                # Check for expired locks and return them to queue
+                await self._check_expired_locks(queue_name)
+                
+                if queue_name not in self._messages or not self._messages[queue_name]:
+                    return None
+                
+                # Get first available message
+                message = self._messages[queue_name][0]
+                
+                if mode == ReceiveMode.RECEIVE_AND_DELETE:
+                    # Remove message immediately
+                    self._messages[queue_name].pop(0)
+                    await self._update_runtime_info(queue_name)
+                    return message
+                
+                # PeekLock mode - lock the message
+                queue = self._queues[queue_name]
+                lock_token = str(uuid.uuid4())
+                locked_until = datetime.now(timezone.utc) + timedelta(seconds=queue.properties.lock_duration)
+                
+                message.lock_token = lock_token
+                message.locked_until_utc = locked_until
+                message.is_locked = True
+                message.delivery_count += 1
+                
+                # Move to locked messages
                 self._messages[queue_name].pop(0)
+                if queue_name not in self._locked_messages:
+                    self._locked_messages[queue_name] = {}
+                self._locked_messages[queue_name][lock_token] = (message, locked_until)
+                
                 await self._update_runtime_info(queue_name)
+                
+                # Log message received
+                self._logger.log_message_operation(
+                    operation="message_received",
+                    entity_type="queue",
+                    entity_name=queue_name,
+                    message_id=message.message_id,
+                    sequence_number=message.sequence_number,
+                    delivery_count=message.delivery_count,
+                    session_id=message.session_id,
+                    lock_token=lock_token
+                )
+                
+                # Track metrics
+                duration = time.perf_counter() - start_time
+                self._metrics.track_message_received('queue', queue_name, duration)
+                
                 return message
-            
-            # PeekLock mode - lock the message
-            queue = self._queues[queue_name]
-            lock_token = str(uuid.uuid4())
-            locked_until = datetime.now(timezone.utc) + timedelta(seconds=queue.properties.lock_duration)
-            
-            message.lock_token = lock_token
-            message.locked_until_utc = locked_until
-            message.is_locked = True
-            message.delivery_count += 1
-            
-            # Move to locked messages
-            self._messages[queue_name].pop(0)
-            if queue_name not in self._locked_messages:
-                self._locked_messages[queue_name] = {}
-            self._locked_messages[queue_name][lock_token] = (message, locked_until)
-            
-            await self._update_runtime_info(queue_name)
-            
-            # Log message received
-            self._logger.log_message_operation(
-                operation="message_received",
-                entity_type="queue",
-                entity_name=queue_name,
-                message_id=message.message_id,
-                sequence_number=message.sequence_number,
-                delivery_count=message.delivery_count,
-                session_id=message.session_id,
-                lock_token=lock_token
-            )
-            
-            return message
+        except Exception as e:
+            # Track error
+            self._metrics.track_error('receive_message', type(e).__name__)
+            raise
     
     async def complete_message(
         self,
@@ -553,6 +648,9 @@ class ServiceBusBackend:
                 sequence_number=message.sequence_number,
                 lock_token=lock_token
             )
+            
+            # Track metrics
+            self._metrics.track_message_completed('queue', queue_name)
             
             await self._update_runtime_info(queue_name)
     
@@ -621,6 +719,9 @@ class ServiceBusBackend:
                 returned_to_queue=message.delivery_count < queue.properties.max_delivery_count
             )
             
+            # Track metrics
+            self._metrics.track_message_abandoned('queue', queue_name)
+            
             await self._update_runtime_info(queue_name)
     
     async def dead_letter_message(
@@ -679,6 +780,9 @@ class ServiceBusBackend:
                 reason=reason or "Unknown",
                 description=description
             )
+            
+            # Track metrics
+            self._metrics.track_message_deadlettered('queue', queue_name, reason or "Unknown")
             
             await self._update_runtime_info(queue_name)
     

@@ -295,6 +295,346 @@ def _queue_to_xml(queue) -> str:
     return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")
 
 
+# ========== Topic Management Endpoints ==========
+
+@router.put("/{namespace}/topics/{topic_name}")
+async def create_or_update_topic(
+    namespace: str,
+    topic_name: str,
+    request: Request,
+):
+    """Create or update a Service Bus topic."""
+    try:
+        body = await request.body()
+        root = ET.fromstring(body.decode("utf-8"))
+        
+        properties_dict = {}
+        ns = {"": "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"}
+        desc_elem = root.find(".//TopicDescription", ns)
+        if desc_elem is None:
+            desc_elem = root
+        
+        # Map PascalCase XML properties to snake_case model properties
+        property_map = {
+            "MaxSizeInMegabytes": "max_size_in_megabytes",
+            "DefaultMessageTimeToLive": "default_message_time_to_live",
+            "RequiresDuplicateDetection": "requires_duplicate_detection",
+            "EnableBatchedOperations": "enable_batched_operations",
+            "SupportOrdering": "support_ordering",
+        }
+        
+        for xml_name, model_name in property_map.items():
+            elem = desc_elem.find(xml_name, ns)
+            if elem is not None and elem.text:
+                value = elem.text
+                # Convert types
+                if model_name == "max_size_in_megabytes":
+                    properties_dict[model_name] = int(value)
+                elif model_name == "default_message_time_to_live":
+                    # Parse ISO 8601 duration to seconds
+                    if value.startswith("P"):
+                        properties_dict[model_name] = _parse_iso_duration(value)
+                    else:
+                        properties_dict[model_name] = int(value)
+                elif model_name in ["requires_duplicate_detection", "enable_batched_operations", "support_ordering"]:
+                    properties_dict[model_name] = value.lower() == "true"
+                else:
+                    properties_dict[model_name] = value
+        
+        properties = TopicProperties(**properties_dict) if properties_dict else TopicProperties()
+        
+        try:
+            await backend.get_topic(topic_name)
+            topic = await backend.update_topic(topic_name, properties)
+            status_code = status.HTTP_200_OK
+        except TopicNotFoundError:
+            topic = await backend.create_topic(topic_name, properties)
+            status_code = status.HTTP_201_CREATED
+        
+        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom">
+    <id>https://{namespace}.servicebus.windows.net/topics/{topic_name}</id>
+    <title type="text">{topic_name}</title>
+    <content type="application/xml">
+        <TopicDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+            <MaxSizeInMegabytes>{topic.properties.max_size_in_megabytes}</MaxSizeInMegabytes>
+            <SubscriptionCount>{topic.runtime_info.subscription_count}</SubscriptionCount>
+        </TopicDescription>
+    </content>
+</entry>"""
+        
+        return Response(content=response_xml, media_type="application/xml", status_code=status_code)
+        
+    except TopicAlreadyExistsError:
+        # Let exception handler convert to JSON error response
+        raise
+    except QuotaExceededError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+@router.get("/{namespace}/topics")
+async def list_topics(namespace: str):
+    """List all Service Bus topics."""
+    topics = await backend.list_topics()
+    
+    feed = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Topics</title>'
+    
+    for topic in topics:
+        feed += f'<entry><id>https://{namespace}.servicebus.windows.net/topics/{topic.name}</id><title type="text">{topic.name}</title></entry>'
+    
+    feed += '</feed>'
+    return Response(content=feed, media_type="application/xml")
+
+
+@router.get("/{namespace}/topics/{topic_name}")
+async def get_topic(namespace: str, topic_name: str):
+    """Get details of a specific topic."""
+    try:
+        topic = await backend.get_topic(topic_name)
+        
+        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom">
+    <id>https://{namespace}.servicebus.windows.net/topics/{topic_name}</id>
+    <title type="text">{topic_name}</title>
+    <content type="application/xml">
+        <TopicDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+            <MaxSizeInMegabytes>{topic.properties.max_size_in_megabytes}</MaxSizeInMegabytes>
+            <SubscriptionCount>{topic.runtime_info.subscription_count}</SubscriptionCount>
+        </TopicDescription>
+    </content>
+</entry>"""
+        
+        return Response(content=response_xml, media_type="application/xml")
+        
+    except TopicNotFoundError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+@router.delete("/{namespace}/topics/{topic_name}")
+async def delete_topic(namespace: str, topic_name: str):
+    """Delete a Service Bus topic."""
+    try:
+        await backend.delete_topic(topic_name)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except TopicNotFoundError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+# ========== Subscription Management Endpoints ==========
+
+@router.put("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}")
+async def create_or_update_subscription(namespace: str, topic_name: str, subscription_name: str, request: Request):
+    """Create or update a subscription."""
+    try:
+        body = await request.body()
+        root = ET.fromstring(body.decode("utf-8"))
+        
+        properties_dict = {}
+        ns = {"": "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"}
+        desc_elem = root.find(".//SubscriptionDescription", ns) or root
+        
+        # Map PascalCase XML properties to snake_case model properties
+        property_map = {
+            "LockDuration": "lock_duration",
+            "MaxDeliveryCount": "max_delivery_count",
+            "RequiresSession": "requires_session",
+            "DefaultMessageTimeToLive": "default_message_time_to_live",
+            "DeadLetteringOnMessageExpiration": "dead_lettering_on_message_expiration",
+        }
+        
+        for xml_name, model_name in property_map.items():
+            elem = desc_elem.find(xml_name, ns)
+            if elem is not None and elem.text:
+                value = elem.text
+                # Convert types
+                if model_name == "lock_duration":
+                    # Parse ISO 8601 duration to seconds
+                    if value.startswith("PT"):
+                        properties_dict[model_name] = _parse_iso_duration(value)
+                    else:
+                        properties_dict[model_name] = int(value)
+                elif model_name == "max_delivery_count":
+                    properties_dict[model_name] = int(value)
+                elif model_name == "default_message_time_to_live":
+                    # Parse ISO 8601 duration to seconds
+                    if value.startswith("P"):
+                        properties_dict[model_name] = _parse_iso_duration(value)
+                    else:
+                        properties_dict[model_name] = int(value)
+                elif model_name in ["requires_session", "dead_lettering_on_message_expiration"]:
+                    properties_dict[model_name] = value.lower() == "true"
+                else:
+                    properties_dict[model_name] = value
+        
+        properties = SubscriptionProperties(**properties_dict) if properties_dict else SubscriptionProperties()
+        
+        try:
+            await backend.get_subscription(topic_name, subscription_name)
+            subscription = await backend.update_subscription(topic_name, subscription_name, properties)
+            status_code = status.HTTP_200_OK
+        except SubscriptionNotFoundError:
+            subscription = await backend.create_subscription(topic_name, subscription_name, properties)
+            status_code = status.HTTP_201_CREATED
+        
+        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom">
+    <content type="application/xml">
+        <SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+            <LockDuration>{subscription.properties.lock_duration}</LockDuration>
+            <MessageCount>{subscription.runtime_info.message_count}</MessageCount>
+        </SubscriptionDescription>
+    </content>
+</entry>"""
+        
+        return Response(content=response_xml, media_type="application/xml", status_code=status_code)
+        
+    except TopicNotFoundError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+@router.get("/{namespace}/topics/{topic_name}/subscriptions")
+async def list_subscriptions(namespace: str, topic_name: str):
+    """List all subscriptions for a topic."""
+    try:
+        subscriptions = await backend.list_subscriptions(topic_name)
+        
+        feed = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Subscriptions</title>'
+        for sub in subscriptions:
+            feed += f'<entry><id>https://{namespace}.servicebus.windows.net/topics/{topic_name}/subscriptions/{sub.subscription_name}</id><title type="text">{sub.subscription_name}</title></entry>'
+        feed += '</feed>'
+        
+        return Response(content=feed, media_type="application/xml")
+    except TopicNotFoundError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+@router.get("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}")
+async def get_subscription(namespace: str, topic_name: str, subscription_name: str):
+    """Get details of a specific subscription."""
+    try:
+        subscription = await backend.get_subscription(topic_name, subscription_name)
+        
+        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom">
+    <content type="application/xml">
+        <SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
+            <MessageCount>{subscription.runtime_info.message_count}</MessageCount>
+        </SubscriptionDescription>
+    </content>
+</entry>"""
+        
+        return Response(content=response_xml, media_type="application/xml")
+    except SubscriptionNotFoundError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+@router.delete("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}")
+async def delete_subscription(namespace: str, topic_name: str, subscription_name: str):
+    """Delete a subscription."""
+    try:
+        await backend.delete_subscription(topic_name, subscription_name)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except SubscriptionNotFoundError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+# ========== Topic Message Endpoints ==========
+
+@router.post("/{namespace}/topics/{topic_name}/messages")
+async def send_to_topic(namespace: str, topic_name: str, request: SendMessageRequest):
+    """Send a message to a topic (fan-out to matching subscriptions)."""
+    try:
+        message = await backend.send_to_topic(topic_name, request)
+        return Response(status_code=status.HTTP_201_CREATED, headers={"BrokerProperties": f'{{"MessageId":"{message.message_id}"}}'})
+    except TopicNotFoundError:
+        # Let exception handler convert to JSON error response
+        raise
+
+
+@router.post("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}/messages/head")
+async def receive_from_subscription(
+    topic_name: str, 
+    subscription_name: str,
+    num_of_messages: int = Query(default=1, alias="numofmessages"),
+    timeout: int = Query(default=60),
+    mode: str = Query(default="peeklock"),
+):
+    """
+    Receive messages from a subscription.
+    
+    Args:
+        topic_name: Name of the topic
+        subscription_name: Name of the subscription
+        num_of_messages: Maximum number of messages to receive
+        timeout: Receive timeout in seconds
+        mode: Receive mode ('peeklock' or 'receiveanddelete')
+        
+    Returns:
+        List of messages or 204 No Content if no messages available
+        
+    Raises:
+        SubscriptionNotFoundError: If subscription doesn't exist
+    """
+    try:
+        receive_mode = (
+            ReceiveMode.PEEK_LOCK 
+            if mode.lower() == "peeklock" 
+            else ReceiveMode.RECEIVE_AND_DELETE
+        )
+        
+        messages = await backend.receive_from_subscription(
+            topic_name, 
+            subscription_name, 
+            receive_mode, 
+            num_of_messages
+        )
+        
+        if not messages:
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        
+        return [msg.model_dump(mode="json", by_alias=True) for msg in messages]
+    except SubscriptionNotFoundError:
+        raise
+
+
+@router.delete("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}/messages/{message_id}/{lock_token}")
+async def complete_subscription_message(
+    topic_name: str, 
+    subscription_name: str, 
+    lock_token: str
+):
+    """
+    Complete a subscription message (remove from queue).
+    
+    Args:
+        topic_name: Name of the topic
+        subscription_name: Name of the subscription
+        lock_token: Lock token for the message
+        
+    Returns:
+        200 OK response
+        
+    Raises:
+        SubscriptionNotFoundError: If subscription doesn't exist
+        MessageLockLostError: If message lock has expired
+    """
+    try:
+        await backend.complete_subscription_message(
+            topic_name, 
+            subscription_name, 
+            lock_token
+        )
+        return Response(status_code=status.HTTP_200_OK)
+    except (SubscriptionNotFoundError, MessageLockLostError):
+        raise
+
 @router.put(
     "/{namespace}/{queue_name}",
     summary="Create or Update Service Bus Queue",
@@ -737,344 +1077,6 @@ async def renew_lock(
         # Let exception handler convert to JSON error response
         raise
 
-
-# ========== Topic Management Endpoints ==========
-
-@router.put("/{namespace}/topics/{topic_name}")
-async def create_or_update_topic(
-    namespace: str,
-    topic_name: str,
-    request: Request,
-):
-    """Create or update a Service Bus topic."""
-    try:
-        body = await request.body()
-        root = ET.fromstring(body.decode("utf-8"))
-        
-        properties_dict = {}
-        ns = {"": "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"}
-        desc_elem = root.find(".//TopicDescription", ns)
-        if desc_elem is None:
-            desc_elem = root
-        
-        # Map PascalCase XML properties to snake_case model properties
-        property_map = {
-            "MaxSizeInMegabytes": "max_size_in_megabytes",
-            "DefaultMessageTimeToLive": "default_message_time_to_live",
-            "RequiresDuplicateDetection": "requires_duplicate_detection",
-            "EnableBatchedOperations": "enable_batched_operations",
-            "SupportOrdering": "support_ordering",
-        }
-        
-        for xml_name, model_name in property_map.items():
-            elem = desc_elem.find(xml_name, ns)
-            if elem is not None and elem.text:
-                value = elem.text
-                # Convert types
-                if model_name == "max_size_in_megabytes":
-                    properties_dict[model_name] = int(value)
-                elif model_name == "default_message_time_to_live":
-                    # Parse ISO 8601 duration to seconds
-                    if value.startswith("P"):
-                        properties_dict[model_name] = _parse_iso_duration(value)
-                    else:
-                        properties_dict[model_name] = int(value)
-                elif model_name in ["requires_duplicate_detection", "enable_batched_operations", "support_ordering"]:
-                    properties_dict[model_name] = value.lower() == "true"
-                else:
-                    properties_dict[model_name] = value
-        
-        properties = TopicProperties(**properties_dict) if properties_dict else TopicProperties()
-        
-        try:
-            await backend.get_topic(topic_name)
-            topic = await backend.update_topic(topic_name, properties)
-            status_code = status.HTTP_200_OK
-        except TopicNotFoundError:
-            topic = await backend.create_topic(topic_name, properties)
-            status_code = status.HTTP_201_CREATED
-        
-        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<entry xmlns="http://www.w3.org/2005/Atom">
-    <id>https://{namespace}.servicebus.windows.net/topics/{topic_name}</id>
-    <title type="text">{topic_name}</title>
-    <content type="application/xml">
-        <TopicDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
-            <MaxSizeInMegabytes>{topic.properties.max_size_in_megabytes}</MaxSizeInMegabytes>
-            <SubscriptionCount>{topic.runtime_info.subscription_count}</SubscriptionCount>
-        </TopicDescription>
-    </content>
-</entry>"""
-        
-        return Response(content=response_xml, media_type="application/xml", status_code=status_code)
-        
-    except TopicAlreadyExistsError:
-        # Let exception handler convert to JSON error response
-        raise
-    except QuotaExceededError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-@router.get("/{namespace}/topics")
-async def list_topics(namespace: str):
-    """List all Service Bus topics."""
-    topics = await backend.list_topics()
-    
-    feed = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Topics</title>'
-    
-    for topic in topics:
-        feed += f'<entry><id>https://{namespace}.servicebus.windows.net/topics/{topic.name}</id><title type="text">{topic.name}</title></entry>'
-    
-    feed += '</feed>'
-    return Response(content=feed, media_type="application/xml")
-
-
-@router.get("/{namespace}/topics/{topic_name}")
-async def get_topic(namespace: str, topic_name: str):
-    """Get details of a specific topic."""
-    try:
-        topic = await backend.get_topic(topic_name)
-        
-        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<entry xmlns="http://www.w3.org/2005/Atom">
-    <content type="application/xml">
-        <TopicDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
-            <MaxSizeInMegabytes>{topic.properties.max_size_in_megabytes}</MaxSizeInMegabytes>
-            <SubscriptionCount>{topic.runtime_info.subscription_count}</SubscriptionCount>
-        </TopicDescription>
-    </content>
-</entry>"""
-        
-        return Response(content=response_xml, media_type="application/xml")
-        
-    except TopicNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-@router.delete("/{namespace}/topics/{topic_name}")
-async def delete_topic(namespace: str, topic_name: str):
-    """Delete a Service Bus topic."""
-    try:
-        await backend.delete_topic(topic_name)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-    except TopicNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-# ========== Subscription Management Endpoints ==========
-
-@router.put("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}")
-async def create_or_update_subscription(namespace: str, topic_name: str, subscription_name: str, request: Request):
-    """Create or update a subscription."""
-    try:
-        body = await request.body()
-        root = ET.fromstring(body.decode("utf-8"))
-        
-        properties_dict = {}
-        ns = {"": "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"}
-        desc_elem = root.find(".//SubscriptionDescription", ns) or root
-        
-        # Map PascalCase XML properties to snake_case model properties
-        property_map = {
-            "LockDuration": "lock_duration",
-            "MaxDeliveryCount": "max_delivery_count",
-            "RequiresSession": "requires_session",
-            "DefaultMessageTimeToLive": "default_message_time_to_live",
-            "DeadLetteringOnMessageExpiration": "dead_lettering_on_message_expiration",
-        }
-        
-        for xml_name, model_name in property_map.items():
-            elem = desc_elem.find(xml_name, ns)
-            if elem is not None and elem.text:
-                value = elem.text
-                # Convert types
-                if model_name == "lock_duration":
-                    # Parse ISO 8601 duration to seconds
-                    if value.startswith("PT"):
-                        properties_dict[model_name] = _parse_iso_duration(value)
-                    else:
-                        properties_dict[model_name] = int(value)
-                elif model_name == "max_delivery_count":
-                    properties_dict[model_name] = int(value)
-                elif model_name == "default_message_time_to_live":
-                    # Parse ISO 8601 duration to seconds
-                    if value.startswith("P"):
-                        properties_dict[model_name] = _parse_iso_duration(value)
-                    else:
-                        properties_dict[model_name] = int(value)
-                elif model_name in ["requires_session", "dead_lettering_on_message_expiration"]:
-                    properties_dict[model_name] = value.lower() == "true"
-                else:
-                    properties_dict[model_name] = value
-        
-        properties = SubscriptionProperties(**properties_dict) if properties_dict else SubscriptionProperties()
-        
-        try:
-            await backend.get_subscription(topic_name, subscription_name)
-            subscription = await backend.update_subscription(topic_name, subscription_name, properties)
-            status_code = status.HTTP_200_OK
-        except SubscriptionNotFoundError:
-            subscription = await backend.create_subscription(topic_name, subscription_name, properties)
-            status_code = status.HTTP_201_CREATED
-        
-        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<entry xmlns="http://www.w3.org/2005/Atom">
-    <content type="application/xml">
-        <SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
-            <LockDuration>{subscription.properties.lock_duration}</LockDuration>
-            <MessageCount>{subscription.runtime_info.message_count}</MessageCount>
-        </SubscriptionDescription>
-    </content>
-</entry>"""
-        
-        return Response(content=response_xml, media_type="application/xml", status_code=status_code)
-        
-    except TopicNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-@router.get("/{namespace}/topics/{topic_name}/subscriptions")
-async def list_subscriptions(namespace: str, topic_name: str):
-    """List all subscriptions for a topic."""
-    try:
-        subscriptions = await backend.list_subscriptions(topic_name)
-        
-        feed = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Subscriptions</title>'
-        for sub in subscriptions:
-            feed += f'<entry><id>https://{namespace}.servicebus.windows.net/topics/{topic_name}/subscriptions/{sub.subscription_name}</id><title type="text">{sub.subscription_name}</title></entry>'
-        feed += '</feed>'
-        
-        return Response(content=feed, media_type="application/xml")
-    except TopicNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-@router.get("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}")
-async def get_subscription(namespace: str, topic_name: str, subscription_name: str):
-    """Get details of a specific subscription."""
-    try:
-        subscription = await backend.get_subscription(topic_name, subscription_name)
-        
-        response_xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<entry xmlns="http://www.w3.org/2005/Atom">
-    <content type="application/xml">
-        <SubscriptionDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect">
-            <MessageCount>{subscription.runtime_info.message_count}</MessageCount>
-        </SubscriptionDescription>
-    </content>
-</entry>"""
-        
-        return Response(content=response_xml, media_type="application/xml")
-    except SubscriptionNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-@router.delete("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}")
-async def delete_subscription(namespace: str, topic_name: str, subscription_name: str):
-    """Delete a subscription."""
-    try:
-        await backend.delete_subscription(topic_name, subscription_name)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-    except SubscriptionNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-# ========== Topic Message Endpoints ==========
-
-@router.post("/{namespace}/topics/{topic_name}/messages")
-async def send_to_topic(namespace: str, topic_name: str, request: SendMessageRequest):
-    """Send a message to a topic (fan-out to matching subscriptions)."""
-    try:
-        message = await backend.send_to_topic(topic_name, request)
-        return Response(status_code=status.HTTP_201_CREATED, headers={"BrokerProperties": f'{{"MessageId":"{message.message_id}"}}'})
-    except TopicNotFoundError:
-        # Let exception handler convert to JSON error response
-        raise
-
-
-@router.post("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}/messages/head")
-async def receive_from_subscription(
-    topic_name: str, 
-    subscription_name: str,
-    num_of_messages: int = Query(default=1, alias="numofmessages"),
-    timeout: int = Query(default=60),
-    mode: str = Query(default="peeklock"),
-):
-    """
-    Receive messages from a subscription.
-    
-    Args:
-        topic_name: Name of the topic
-        subscription_name: Name of the subscription
-        num_of_messages: Maximum number of messages to receive
-        timeout: Receive timeout in seconds
-        mode: Receive mode ('peeklock' or 'receiveanddelete')
-        
-    Returns:
-        List of messages or 204 No Content if no messages available
-        
-    Raises:
-        SubscriptionNotFoundError: If subscription doesn't exist
-    """
-    try:
-        receive_mode = (
-            ReceiveMode.PEEK_LOCK 
-            if mode.lower() == "peeklock" 
-            else ReceiveMode.RECEIVE_AND_DELETE
-        )
-        
-        messages = await backend.receive_from_subscription(
-            topic_name, 
-            subscription_name, 
-            receive_mode, 
-            num_of_messages
-        )
-        
-        if not messages:
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
-        
-        return [msg.model_dump(mode="json", by_alias=True) for msg in messages]
-    except SubscriptionNotFoundError:
-        raise
-
-
-@router.delete("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}/messages/{message_id}/{lock_token}")
-async def complete_subscription_message(
-    topic_name: str, 
-    subscription_name: str, 
-    lock_token: str
-):
-    """
-    Complete a subscription message (remove from queue).
-    
-    Args:
-        topic_name: Name of the topic
-        subscription_name: Name of the subscription
-        lock_token: Lock token for the message
-        
-    Returns:
-        200 OK response
-        
-    Raises:
-        SubscriptionNotFoundError: If subscription doesn't exist
-        MessageLockLostError: If message lock has expired
-    """
-    try:
-        await backend.complete_subscription_message(
-            topic_name, 
-            subscription_name, 
-            lock_token
-        )
-        return Response(status_code=status.HTTP_200_OK)
-    except (SubscriptionNotFoundError, MessageLockLostError):
-        raise
 
 
 @router.get("/metrics", include_in_schema=False)

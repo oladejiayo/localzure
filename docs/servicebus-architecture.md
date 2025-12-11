@@ -332,7 +332,129 @@ flowchart TD
 
 ### Storage Layer
 
-In-memory storage using Python dictionaries and lists.
+**Overview:**
+
+LocalZure Service Bus supports optional persistent storage (SVC-SB-010) with pluggable backends.
+
+**Storage Architecture:**
+
+```mermaid
+graph TB
+    subgraph Backend ["Service Bus Backend"]
+        CORE[Core Logic]
+        PERSIST[Persistence Manager]
+    end
+    
+    subgraph Storage ["Storage Layer"]
+        INTERFACE[StorageBackend Interface]
+        INMEM[InMemoryStorage]
+        SQLITE[SQLiteStorage]
+        JSON[JSONStorage]
+        REDIS[RedisStorage*]
+    end
+    
+    subgraph Recovery ["Crash Recovery"]
+        WAL[Write-Ahead Log]
+        REPLAY[WAL Replay]
+    end
+    
+    subgraph Files ["Persistent Files"]
+        DB[(SQLite DB)]
+        JSONFILES[(JSON Files)]
+        WALFILE[(WAL File)]
+    end
+    
+    CORE --> PERSIST
+    PERSIST --> INTERFACE
+    INTERFACE --> INMEM
+    INTERFACE --> SQLITE
+    INTERFACE --> JSON
+    INTERFACE --> REDIS
+    
+    SQLITE --> DB
+    JSON --> JSONFILES
+    PERSIST --> WAL
+    WAL --> WALFILE
+    
+    REPLAY -.->|On Startup| WAL
+    REPLAY -.->|Apply Operations| SQLITE
+    REPLAY -.->|Apply Operations| JSON
+    
+    style Backend fill:#e8f5e9
+    style Storage fill:#fff4e6
+    style Recovery fill:#fce4ec
+    style Files fill:#f3e5f5
+    style REDIS fill:#e0e0e0
+```
+
+*Note: RedisStorage is a placeholder for future implementation*
+
+**Storage Backends:**
+
+| Backend | Use Case | Persistence | ACID | Performance | Dependencies |
+|---------|----------|-------------|------|-------------|--------------|
+| **In-Memory** | Development, Testing | ❌ No | N/A | ⚡ Fastest (baseline) | None |
+| **SQLite** | Production, Single-node | ✅ Yes | ✅ Yes | ~5-10% slower | aiosqlite |
+| **JSON** | Development, Debugging | ✅ Yes | ❌ No | ~15-25% slower | None |
+| **Redis** | Distributed (future) | ✅ Yes | ⚠️ Partial | TBD | redis-py |
+
+**Persistence Lifecycle:**
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Backend as ServiceBusBackend
+    participant Storage as StorageBackend
+    participant WAL as WriteAheadLog
+    participant DB as Database
+    
+    Note over App,DB: Startup Phase
+    App->>Backend: ServiceBusBackend(storage_config)
+    App->>Backend: initialize_persistence()
+    Backend->>Storage: initialize()
+    Storage->>DB: Connect/Open
+    Backend->>WAL: initialize()
+    WAL->>WAL: Check for existing WAL
+    alt WAL exists (crash recovery)
+        WAL->>Storage: replay(operations)
+        Storage->>DB: Apply operations
+        WAL->>WAL: truncate()
+    end
+    Backend->>Storage: load_entities()
+    Storage->>DB: SELECT * FROM entities
+    Backend->>Storage: load_messages()
+    Storage->>DB: SELECT * FROM messages
+    Backend->>Backend: Start snapshot task
+    
+    Note over App,DB: Runtime Phase
+    App->>Backend: send_message(...)
+    Backend->>Backend: Add to in-memory queue
+    Backend->>WAL: log_operation(save_message)
+    WAL->>DB: Append to WAL file
+    
+    loop Every snapshot_interval_seconds
+        Backend->>Backend: _snapshot_loop()
+        Backend->>Storage: save_entity(queue)
+        Storage->>DB: INSERT/UPDATE entity
+        Backend->>Storage: save_message(msg)
+        Storage->>DB: INSERT/UPDATE message
+        Backend->>Storage: snapshot()
+        Backend->>WAL: truncate()
+    end
+    
+    Note over App,DB: Shutdown Phase
+    App->>Backend: shutdown_persistence()
+    Backend->>Backend: Stop snapshot task
+    Backend->>Backend: _persist_current_state()
+    Backend->>Storage: save all entities/messages
+    Backend->>Storage: compact() (if enabled)
+    Backend->>Storage: close()
+    Storage->>DB: Close connection
+```
+
+**In-Memory Storage (Default):**
+
+Default behavior using Python dictionaries and lists.
 
 **Schema:**
 
@@ -396,6 +518,126 @@ _active_locks = {
         locked_until=datetime.utcnow() + timedelta(seconds=60)
     )
 }
+```
+
+**SQLite Persistent Storage:**
+
+When persistence is enabled, data is stored in SQLite with the following schema:
+
+```sql
+-- Entity storage (queues, topics, subscriptions)
+CREATE TABLE entities (
+    entity_type TEXT NOT NULL,       -- 'queue', 'topic', 'subscription'
+    entity_name TEXT NOT NULL,       -- Entity identifier
+    data JSON NOT NULL,              -- Serialized entity properties
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (entity_type, entity_name)
+);
+
+-- Message storage
+CREATE TABLE messages (
+    entity_name TEXT NOT NULL,       -- Queue name or subscription path
+    message_id TEXT NOT NULL,        -- Unique message identifier
+    data JSON NOT NULL,              -- Serialized message
+    state TEXT NOT NULL DEFAULT 'active',  -- 'active', 'deadletter'
+    enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,            -- TTL expiration
+    PRIMARY KEY (entity_name, message_id)
+);
+
+-- Application state (sequence counters, etc.)
+CREATE TABLE state (
+    key TEXT PRIMARY KEY,
+    value JSON NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Schema versioning for migrations
+CREATE TABLE schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Performance indexes
+CREATE INDEX idx_messages_state ON messages(state);
+CREATE INDEX idx_messages_expires ON messages(expires_at);
+CREATE INDEX idx_entities_type ON entities(entity_type);
+```
+
+**SQLite Configuration:**
+
+```sql
+-- Write-Ahead Logging for crash safety
+PRAGMA journal_mode=WAL;
+
+-- Performance tuning
+PRAGMA synchronous=NORMAL;      -- Balance between safety and speed
+PRAGMA cache_size=16000;         -- 64MB cache
+PRAGMA temp_store=MEMORY;        -- Temp tables in memory
+PRAGMA mmap_size=268435456;      -- 256MB memory-mapped I/O
+```
+
+**JSON File Storage:**
+
+Alternative human-readable storage format:
+
+```
+data/
+  entities/
+    queues.json           # All queue definitions
+    topics.json           # All topic definitions  
+    subscriptions.json    # All subscription definitions
+  messages/
+    queue_orders.json     # Messages for 'orders' queue
+    queue_payments.json   # Messages for 'payments' queue
+    subscription_events_high-priority.json  # Subscription messages
+  state.json              # Sequence counters and internal state
+```
+
+**Write-Ahead Log (WAL):**
+
+Crash recovery mechanism that logs all operations before they're applied:
+
+```
+Format: JSON Lines (one operation per line)
+
+Example WAL entries:
+{"op": "save_entity", "entity_type": "queue", "entity_name": "orders", "data": {...}, "ts": "2025-12-11T10:15:23Z"}
+{"op": "save_message", "entity_name": "orders", "message_id": "msg-001", "data": {...}, "state": "active", "ts": "2025-12-11T10:15:24Z"}
+{"op": "delete_message", "entity_name": "orders", "message_id": "msg-001", "ts": "2025-12-11T10:15:25Z"}
+{"op": "save_state", "key": "sequence_counters", "value": {"orders": 42}, "ts": "2025-12-11T10:15:26Z"}
+
+Recovery process:
+1. On startup, check for existing WAL file
+2. If found, load last snapshot from storage
+3. Replay all WAL operations in sequence
+4. Truncate WAL after successful replay
+5. Resume normal operation
+
+WAL is truncated after each snapshot to prevent unbounded growth.
+```
+
+**Configuration Loading:**
+
+```mermaid
+graph LR
+    A[Application Start] --> B{Config File?}
+    B -->|Yes| C[Load YAML]
+    B -->|No| D[Check Environment]
+    C --> E{Env Vars Set?}
+    D --> E
+    E -->|Yes| F[Override with ENV]
+    E -->|No| G[Use Defaults]
+    F --> H[StorageConfig]
+    G --> H
+    H --> I[Create Backend]
+    
+    style H fill:#e8f5e9
+```
+
+Priority: Environment Variables > YAML Config > Defaults
+
 **Queue Send/Receive:**
 
 ```mermaid

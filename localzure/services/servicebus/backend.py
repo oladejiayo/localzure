@@ -70,6 +70,14 @@ from .exceptions import (
     InvalidOperationError,
     DeadLetterReason,
 )
+from .storage import (
+    StorageBackend,
+    StorageConfig,
+    StorageType,
+    create_storage_backend,
+    WriteAheadLog,
+    WALOperation,
+)
 
 
 class ServiceBusBackend:
@@ -89,8 +97,13 @@ class ServiceBusBackend:
         _filter_evaluator: SQL filter evaluator for subscription filters
     """
     
-    def __init__(self):
-        """Initialize the Service Bus backend with empty storage."""
+    def __init__(self, storage_config: Optional[StorageConfig] = None):
+        """
+        Initialize the Service Bus backend with optional persistent storage.
+        
+        Args:
+            storage_config: Storage configuration. If None, uses in-memory storage.
+        """
         # Queue storage
         self._queues: Dict[str, QueueDescription] = {}
         self._messages: Dict[str, List[ServiceBusMessage]] = {}
@@ -138,6 +151,14 @@ class ServiceBusBackend:
         self._audit_logger = AuditLogger()
         self._metrics = get_metrics()
         
+        # Persistence layer (SVC-SB-010)
+        self._storage_config = storage_config or StorageConfig(storage_type=StorageType.IN_MEMORY)
+        self._storage: Optional[StorageBackend] = None
+        self._wal: Optional[WriteAheadLog] = None
+        self._persistence_enabled = self._storage_config.storage_type != StorageType.IN_MEMORY
+        self._snapshot_task = None
+        self._snapshot_running = False
+        
         # Start background metrics collection
         self._metrics_task = None
         self._metrics_running = False
@@ -157,6 +178,252 @@ class ServiceBusBackend:
                 await self._metrics_task
             except asyncio.CancelledError:
                 pass
+    
+    # ========== Persistence Lifecycle (SVC-SB-010) ==========
+    
+    async def initialize_persistence(self):
+        """
+        Initialize persistent storage and recover state.
+        
+        Called during startup to:
+        1. Initialize storage backend
+        2. Replay WAL for crash recovery
+        3. Load persisted entities and messages
+        4. Start background snapshot task
+        """
+        if not self._persistence_enabled:
+            return
+        
+        try:
+            # Create and initialize storage backend
+            self._storage = create_storage_backend(self._storage_config)
+            await self._storage.initialize()
+            
+            # Initialize WAL if enabled
+            if self._storage_config.wal_enabled:
+                wal_path = f"{self._storage_config.sqlite_path}.wal" if self._storage_config.storage_type == StorageType.SQLITE else f"{self._storage_config.json_path}/operations.wal"
+                self._wal = WriteAheadLog(wal_path)
+                await self._wal.initialize()
+                
+                # Replay WAL for crash recovery
+                operations_count = await self._wal.replay(self._storage)
+                if operations_count > 0:
+                    self._logger.log_info(
+                        operation="wal_replay",
+                        message=f"Replayed {operations_count} operations from WAL"
+                    )
+                
+                # Truncate WAL after successful replay
+                await self._wal.truncate()
+            
+            # Load persisted state
+            await self._load_persisted_state()
+            
+            # Start background snapshot task
+            if self._storage_config.snapshot_interval_seconds > 0:
+                self._snapshot_running = True
+                self._snapshot_task = asyncio.create_task(self._snapshot_loop())
+            
+            self._logger.log_info(
+                operation="persistence_initialized",
+                storage_type=self._storage_config.storage_type.value,
+                wal_enabled=self._storage_config.wal_enabled
+            )
+        
+        except Exception as e:
+            self._logger.log_error(
+                operation="persistence_initialization_failed",
+                error_type=type(e).__name__,
+                error_message=str(e)
+            )
+            # Fall back to in-memory mode
+            self._persistence_enabled = False
+            self._storage = None
+            self._wal = None
+    
+    async def shutdown_persistence(self):
+        """
+        Gracefully shutdown persistence layer.
+        
+        Called during shutdown to:
+        1. Stop snapshot task
+        2. Take final snapshot
+        3. Compact storage if enabled
+        4. Close storage backend
+        """
+        if not self._persistence_enabled or not self._storage:
+            return
+        
+        try:
+            # Stop snapshot task
+            self._snapshot_running = False
+            if self._snapshot_task:
+                self._snapshot_task.cancel()
+                try:
+                    await self._snapshot_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Take final snapshot
+            await self._persist_current_state()
+            
+            # Compact storage if enabled
+            if self._storage_config.auto_compact:
+                await self._storage.compact()
+            
+            # Close WAL
+            if self._wal:
+                await self._wal.close()
+            
+            # Close storage backend
+            await self._storage.close()
+            
+            self._logger.log_info(
+                operation="persistence_shutdown_complete",
+                storage_type=self._storage_config.storage_type.value
+            )
+        
+        except Exception as e:
+            self._logger.log_error(
+                operation="persistence_shutdown_failed",
+                error_type=type(e).__name__,
+                error_message=str(e)
+            )
+    
+    async def _load_persisted_state(self):
+        """Load entities and messages from persistent storage."""
+        if not self._storage:
+            return
+        
+        async with self._lock:
+            # Load queues
+            queues_data = await self._storage.load_entities("queue")
+            for queue_name, queue_dict in queues_data.items():
+                self._queues[queue_name] = QueueDescription(**queue_dict)
+                self._messages[queue_name] = []
+                self._dead_letter_messages[queue_name] = []
+                self._locked_messages[queue_name] = {}
+                
+                # Load queue messages
+                messages_data = await self._storage.load_messages(queue_name, state="active")
+                for msg_dict in messages_data:
+                    self._messages[queue_name].append(ServiceBusMessage(**msg_dict))
+                
+                # Load dead-letter messages
+                deadletter_data = await self._storage.load_messages(queue_name, state="deadletter")
+                for msg_dict in deadletter_data:
+                    self._dead_letter_messages[queue_name].append(ServiceBusMessage(**msg_dict))
+            
+            # Load topics
+            topics_data = await self._storage.load_entities("topic")
+            for topic_name, topic_dict in topics_data.items():
+                self._topics[topic_name] = TopicDescription(**topic_dict)
+            
+            # Load subscriptions
+            subscriptions_data = await self._storage.load_entities("subscription")
+            for sub_key, sub_dict in subscriptions_data.items():
+                topic_name, sub_name = sub_key.split("/", 1)
+                key = (topic_name, sub_name)
+                self._subscriptions[key] = SubscriptionDescription(**sub_dict)
+                self._subscription_messages[key] = []
+                self._subscription_dead_letter[key] = []
+                self._subscription_locked[key] = {}
+                
+                # Load subscription messages
+                messages_data = await self._storage.load_messages(sub_key, state="active")
+                for msg_dict in messages_data:
+                    self._subscription_messages[key].append(ServiceBusMessage(**msg_dict))
+                
+                # Load subscription dead-letter messages
+                deadletter_data = await self._storage.load_messages(sub_key, state="deadletter")
+                for msg_dict in deadletter_data:
+                    self._subscription_dead_letter[key].append(ServiceBusMessage(**msg_dict))
+            
+            # Load sequence counters
+            counters_state = await self._storage.load_state("sequence_counters")
+            if counters_state:
+                self._sequence_counters = counters_state
+    
+    async def _persist_current_state(self):
+        """Persist all current entities and messages to storage."""
+        if not self._storage:
+            return
+        
+        async with self._lock:
+            # Save queues
+            for queue_name, queue_desc in self._queues.items():
+                await self._storage.save_entity("queue", queue_name, queue_desc.model_dump())
+                
+                # Save queue messages
+                for message in self._messages.get(queue_name, []):
+                    await self._storage.save_message(
+                        queue_name,
+                        message.message_id,
+                        message.model_dump(),
+                        state="active"
+                    )
+                
+                # Save dead-letter messages
+                for message in self._dead_letter_messages.get(queue_name, []):
+                    await self._storage.save_message(
+                        queue_name,
+                        message.message_id,
+                        message.model_dump(),
+                        state="deadletter"
+                    )
+            
+            # Save topics
+            for topic_name, topic_desc in self._topics.items():
+                await self._storage.save_entity("topic", topic_name, topic_desc.model_dump())
+            
+            # Save subscriptions
+            for (topic_name, sub_name), sub_desc in self._subscriptions.items():
+                sub_key = f"{topic_name}/{sub_name}"
+                await self._storage.save_entity("subscription", sub_key, sub_desc.model_dump())
+                
+                # Save subscription messages
+                for message in self._subscription_messages.get((topic_name, sub_name), []):
+                    await self._storage.save_message(
+                        sub_key,
+                        message.message_id,
+                        message.model_dump(),
+                        state="active"
+                    )
+                
+                # Save subscription dead-letter messages
+                for message in self._subscription_dead_letter.get((topic_name, sub_name), []):
+                    await self._storage.save_message(
+                        sub_key,
+                        message.message_id,
+                        message.model_dump(),
+                        state="deadletter"
+                    )
+            
+            # Save sequence counters
+            await self._storage.save_state("sequence_counters", self._sequence_counters)
+            
+            # Take snapshot
+            await self._storage.snapshot()
+    
+    async def _snapshot_loop(self):
+        """Background task to periodically snapshot state."""
+        while self._snapshot_running:
+            try:
+                await asyncio.sleep(self._storage_config.snapshot_interval_seconds)
+                await self._persist_current_state()
+                
+                # Truncate WAL after successful snapshot
+                if self._wal:
+                    await self._wal.truncate()
+            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.log_error(
+                    operation="snapshot_failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e)
+                )
     
     async def _collect_metrics_loop(self):
         """Background task to collect gauge metrics every 10 seconds."""
@@ -590,6 +857,34 @@ class ServiceBusBackend:
             # Track error
             self._metrics.track_error('receive_message', type(e).__name__)
             raise
+    
+    async def receive_messages(
+        self,
+        queue_name: str,
+        max_count: int = 1,
+        mode: str = ReceiveMode.PEEK_LOCK
+    ) -> List[ServiceBusMessage]:
+        """
+        Receive multiple messages from a Service Bus queue.
+        
+        Args:
+            queue_name: Name of the queue
+            max_count: Maximum number of messages to receive
+            mode: Receive mode (PeekLock or ReceiveAndDelete)
+            
+        Returns:
+            List of messages (may be fewer than max_count if not enough available)
+            
+        Raises:
+            QueueNotFoundError: If the queue does not exist
+        """
+        messages = []
+        for _ in range(max_count):
+            message = await self.receive_message(queue_name, mode)
+            if message is None:
+                break
+            messages.append(message)
+        return messages
     
     async def complete_message(
         self,

@@ -19,6 +19,9 @@ httpx>=0.25.0
 # Async support
 asyncio>=3.4.3
 
+# Persistence (SVC-SB-010)
+aiosqlite>=0.19.0
+
 # Docker integration (optional but recommended)
 docker>=7.0.0
 

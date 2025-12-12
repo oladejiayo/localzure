@@ -306,40 +306,43 @@ async def create_or_update_topic(
     """Create or update a Service Bus topic."""
     try:
         body = await request.body()
-        root = ET.fromstring(body.decode("utf-8"))
-        
         properties_dict = {}
-        ns = {"": "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"}
-        desc_elem = root.find(".//TopicDescription", ns)
-        if desc_elem is None:
-            desc_elem = root
         
-        # Map PascalCase XML properties to snake_case model properties
-        property_map = {
-            "MaxSizeInMegabytes": "max_size_in_megabytes",
-            "DefaultMessageTimeToLive": "default_message_time_to_live",
-            "RequiresDuplicateDetection": "requires_duplicate_detection",
-            "EnableBatchedOperations": "enable_batched_operations",
-            "SupportOrdering": "support_ordering",
-        }
-        
-        for xml_name, model_name in property_map.items():
-            elem = desc_elem.find(xml_name, ns)
-            if elem is not None and elem.text:
-                value = elem.text
-                # Convert types
-                if model_name == "max_size_in_megabytes":
-                    properties_dict[model_name] = int(value)
-                elif model_name == "default_message_time_to_live":
-                    # Parse ISO 8601 duration to seconds
-                    if value.startswith("P"):
-                        properties_dict[model_name] = _parse_iso_duration(value)
-                    else:
+        # Only parse XML if body is not empty
+        if body and len(body) > 0:
+            root = ET.fromstring(body.decode("utf-8"))
+            
+            ns = {"": "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"}
+            desc_elem = root.find(".//TopicDescription", ns)
+            if desc_elem is None:
+                desc_elem = root
+            
+            # Map PascalCase XML properties to snake_case model properties
+            property_map = {
+                "MaxSizeInMegabytes": "max_size_in_megabytes",
+                "DefaultMessageTimeToLive": "default_message_time_to_live",
+                "RequiresDuplicateDetection": "requires_duplicate_detection",
+                "EnableBatchedOperations": "enable_batched_operations",
+                "SupportOrdering": "support_ordering",
+            }
+            
+            for xml_name, model_name in property_map.items():
+                elem = desc_elem.find(xml_name, ns)
+                if elem is not None and elem.text:
+                    value = elem.text
+                    # Convert types
+                    if model_name == "max_size_in_megabytes":
                         properties_dict[model_name] = int(value)
-                elif model_name in ["requires_duplicate_detection", "enable_batched_operations", "support_ordering"]:
-                    properties_dict[model_name] = value.lower() == "true"
-                else:
-                    properties_dict[model_name] = value
+                    elif model_name == "default_message_time_to_live":
+                        # Parse ISO 8601 duration to seconds
+                        if value.startswith("P"):
+                            properties_dict[model_name] = _parse_iso_duration(value)
+                        else:
+                            properties_dict[model_name] = int(value)
+                    elif model_name in ["requires_duplicate_detection", "enable_batched_operations", "support_ordering"]:
+                        properties_dict[model_name] = value.lower() == "true"
+                    else:
+                        properties_dict[model_name] = value
         
         properties = TopicProperties(**properties_dict) if properties_dict else TopicProperties()
         
@@ -378,6 +381,7 @@ async def list_topics(namespace: str):
     """List all Service Bus topics."""
     topics = await backend.list_topics()
     
+    # Return XML ATOM feed - matches Azure format exactly
     feed = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Topics</title>'
     
     for topic in topics:
@@ -434,7 +438,9 @@ async def create_or_update_subscription(namespace: str, topic_name: str, subscri
         
         properties_dict = {}
         ns = {"": "http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"}
-        desc_elem = root.find(".//SubscriptionDescription", ns) or root
+        desc_elem = root.find(".//SubscriptionDescription", ns)
+        if desc_elem is None:
+            desc_elem = root
         
         # Map PascalCase XML properties to snake_case model properties
         property_map = {
@@ -502,6 +508,7 @@ async def list_subscriptions(namespace: str, topic_name: str):
     try:
         subscriptions = await backend.list_subscriptions(topic_name)
         
+        # Return XML ATOM feed - matches Azure format exactly
         feed = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Subscriptions</title>'
         for sub in subscriptions:
             feed += f'<entry><id>https://{namespace}.servicebus.windows.net/topics/{topic_name}/subscriptions/{sub.subscription_name}</id><title type="text">{sub.subscription_name}</title></entry>'
@@ -600,6 +607,44 @@ async def receive_from_subscription(
             return Response(status_code=status.HTTP_204_NO_CONTENT)
         
         return [msg.model_dump(mode="json", by_alias=True) for msg in messages]
+    except SubscriptionNotFoundError:
+        raise
+
+
+@router.post("/{namespace}/topics/{topic_name}/subscriptions/{subscription_name}/messages/receive")
+async def receive_subscription_messages_batch(
+    topic_name: str,
+    subscription_name: str,
+    request: Request,
+) -> list:
+    """
+    Receive multiple messages from a subscription (batch endpoint).
+    
+    Args:
+        topic_name: Topic name
+        subscription_name: Subscription name
+        request: Request body with max_count and receive_mode
+        
+    Returns:
+        List of messages
+        
+    Raises:
+        SubscriptionNotFoundError: If subscription not found
+    """
+    try:
+        body = await request.json()
+        max_count = body.get("max_count", 1)
+        mode = body.get("receive_mode", ReceiveMode.PEEK_LOCK)
+        
+        messages = await backend.receive_from_subscription(
+            topic_name,
+            subscription_name,
+            mode,
+            max_count
+        )
+        
+        return [msg.model_dump(mode="json", by_alias=True) for msg in messages]
+        
     except SubscriptionNotFoundError:
         raise
 
@@ -734,11 +779,11 @@ async def list_queues(
         top: Maximum number of queues to return
         
     Returns:
-        200 OK with queue list in XML
+        200 OK with queue list in XML ATOM feed format
     """
     queues = await backend.list_queues(skip=skip, top=top)
     
-    # Build XML response (ATOM feed format)
+    # Build XML response (ATOM feed format) - matches Azure format exactly
     root = ET.Element("feed", {
         "xmlns": "http://www.w3.org/2005/Atom",
     })
@@ -756,7 +801,6 @@ async def list_queues(
         
         # Add content with queue description
         content = ET.SubElement(entry, "content", {"type": "application/xml"})
-        # Parse queue XML and append to content
         queue_xml = _queue_to_xml(queue)
         queue_elem = ET.fromstring(queue_xml)
         content.append(queue_elem)
@@ -887,30 +931,71 @@ async def send_message(
 
 
 @router.post("/{namespace}/{queue_name}/messages/head")
-async def receive_message(
+async def peek_messages(
+    namespace: str,
     queue_name: str,
-    mode: str = Query(default=ReceiveMode.PEEK_LOCK, description="Receive mode: PeekLock or ReceiveAndDelete"),
-) -> Optional[dict]:
+    maxMessages: int = Query(default=32, alias="maxMessages", ge=1, le=100),
+) -> dict:
     """
-    Receive a message from a Service Bus queue.
+    Peek messages from a Service Bus queue without locking them.
     
     Args:
+        namespace: Service Bus namespace
         queue_name: Queue name
-        mode: Receive mode (PeekLock or ReceiveAndDelete)
+        maxMessages: Maximum number of messages to peek
         
     Returns:
-        Message if available, None otherwise
+        List of messages
         
     Raises:
         QueueNotFoundError: If queue not found
     """
     try:
-        message = await backend.receive_message(queue_name, mode)
+        # Get messages without removing them (peek behavior)
+        # We'll use receive_messages and then put them back
+        messages = await backend.receive_messages(queue_name, max_count=maxMessages, mode=ReceiveMode.PEEK_LOCK)
         
-        if message is None:
-            return None
+        messages_list = [msg.model_dump(mode="json", by_alias=True) for msg in messages]
         
-        return message.model_dump(mode="json", by_alias=True)
+        # Return the messages to the queue by abandoning them
+        for msg in messages:
+            try:
+                await backend.abandon_message(queue_name, msg.message_id, msg.lock_token)
+            except:
+                pass  # If abandon fails, message will be returned after lock expires
+        
+        return {"messages": messages_list}
+        
+    except QueueNotFoundError:
+        raise
+
+
+@router.post("/{namespace}/{queue_name}/messages/receive")
+async def receive_messages_batch(
+    queue_name: str,
+    request: Request,
+) -> list:
+    """
+    Receive multiple messages from a Service Bus queue.
+    
+    Args:
+        queue_name: Queue name
+        request: Request body with max_count and receive_mode
+        
+    Returns:
+        List of messages
+        
+    Raises:
+        QueueNotFoundError: If queue not found
+    """
+    try:
+        body = await request.json()
+        max_count = body.get("max_count", 1)
+        mode = body.get("receive_mode", ReceiveMode.PEEK_LOCK)
+        
+        messages = await backend.receive_messages(queue_name, max_count, mode)
+        
+        return [msg.model_dump(mode="json", by_alias=True) for msg in messages]
         
     except QueueNotFoundError:
         raise

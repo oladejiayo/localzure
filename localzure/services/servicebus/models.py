@@ -208,18 +208,18 @@ class ServiceBusMessage(BaseModel):
 
 class SendMessageRequest(BaseModel):
     """Request model for sending a message to Service Bus queue."""
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='forbid', populate_by_name=True)
     
     body: str
-    session_id: Optional[str] = None
-    correlation_id: Optional[str] = None
-    content_type: Optional[str] = None
+    session_id: Optional[str] = Field(default=None, alias='sessionId')
+    correlation_id: Optional[str] = Field(default=None, alias='correlationId')
+    content_type: Optional[str] = Field(default=None, alias='contentType')
     label: Optional[str] = None
     to: Optional[str] = None
-    reply_to: Optional[str] = None
-    time_to_live: Optional[int] = None
-    scheduled_enqueue_time_utc: Optional[datetime] = None
-    user_properties: Dict[str, str] = Field(default_factory=dict)
+    reply_to: Optional[str] = Field(default=None, alias='replyTo')
+    time_to_live: Optional[int] = Field(default=None, alias='timeToLive')
+    scheduled_enqueue_time_utc: Optional[datetime] = Field(default=None, alias='scheduledEnqueueTimeUtc')
+    user_properties: Dict[str, str] = Field(default_factory=dict, alias='userProperties')
 
 
 class ReceiveMode(str):

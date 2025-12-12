@@ -850,6 +850,8 @@ async def put_blob(
             response_headers = blob.properties.to_headers()
             response_headers['x-ms-request-id'] = 'localzure-request-id'
             response_headers['x-ms-version'] = '2021-08-06'
+            # Remove Content-Length from response to avoid mismatch
+            response_headers.pop('Content-Length', None)
             
             return Response(
                 status_code=status.HTTP_201_CREATED,
@@ -897,6 +899,8 @@ async def put_blob(
             response_headers = blob.properties.to_headers()
             response_headers['x-ms-request-id'] = 'localzure-request-id'
             response_headers['x-ms-version'] = '2021-08-06'
+            # Remove Content-Length from response to avoid mismatch
+            response_headers.pop('Content-Length', None)
             
             return Response(
                 status_code=status.HTTP_200_OK,
@@ -967,6 +971,8 @@ async def put_blob(
         response_headers = blob.properties.to_headers()
         response_headers['x-ms-request-id'] = 'localzure-request-id'
         response_headers['x-ms-version'] = '2021-08-06'
+        # Remove Content-Length from PUT response to avoid mismatch
+        response_headers.pop('Content-Length', None)
         
         return Response(
             status_code=status.HTTP_201_CREATED,

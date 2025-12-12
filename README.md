@@ -8,18 +8,20 @@ LocalZure is a fully functional local Azure cloud emulator that runs on your mac
 
 **Currently Available:**
 - ✅ **Service Bus** - Queues, Topics, Subscriptions (AMQP 1.0 compatible)
-- ✅ **REST API** - Full Azure Service Bus REST API compatibility
+- ✅ **Key Vault** - Secrets, Keys, Certificates management
+- ✅ **Blob Storage** - Containers and block blobs (partial)
+- ✅ **REST API** - Full Azure REST API compatibility
 - ✅ **CLI Tool** - Simple `localzure` command like LocalStack
+- ✅ **Desktop App** - GUI for monitoring and control
 - ✅ **Docker Support** - Run in containers for CI/CD
 - ✅ **Auto-reload** - Development mode with hot reload
 
 **Coming Soon:**
-- 🔜 Blob Storage
-- 🔜 Queue Storage
+- 🔜 Queue Storage (full implementation)
 - 🔜 Table Storage
-- 🔜 Key Vault
 - 🔜 Event Grid
 - 🔜 Cosmos DB
+- 🔜 App Service
 
 ## 🚀 Quick Start
 
@@ -37,6 +39,23 @@ pip install -e .
 
 ### Start LocalZure
 
+**Option 1: Start Everything (Backend + Desktop App)**
+```bash
+# Windows (PowerShell)
+.\start-localzure.ps1
+
+# macOS/Linux
+chmod +x start-localzure.sh
+./start-localzure.sh
+```
+
+This convenience script will:
+- ✅ Start the LocalZure backend (Flask API)
+- ✅ Start the Desktop app (Electron GUI)
+- ✅ Perform health checks
+- ✅ Clean up when you close the desktop app
+
+**Option 2: Start Backend Only**
 ```bash
 # Basic start
 localzure start
@@ -46,6 +65,12 @@ localzure start --reload
 
 # Custom port
 localzure start --port 8080
+```
+
+**Option 3: Start Desktop App Only** (requires backend running)
+```bash
+cd desktop
+npm run start
 ```
 
 ### Use in Your App

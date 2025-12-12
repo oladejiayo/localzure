@@ -129,7 +129,11 @@ class SqlFilterEvaluator:
         Returns:
             True if any operand is true
         """
-        parts = expression.split(' OR ', 1)
+        import re
+        # Case-insensitive split on ' OR '
+        parts = re.split(r'\s+OR\s+', expression, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) != 2:
+            return False
         left = self._evaluate_expression(parts[0].strip(), context)
         right = self._evaluate_expression(parts[1].strip(), context)
         return left or right
@@ -149,7 +153,11 @@ class SqlFilterEvaluator:
         Returns:
             True if all operands are true
         """
-        parts = expression.split(' AND ', 1)
+        import re
+        # Case-insensitive split on ' AND '
+        parts = re.split(r'\s+AND\s+', expression, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) != 2:
+            return False
         left = self._evaluate_expression(parts[0].strip(), context)
         right = self._evaluate_expression(parts[1].strip(), context)
         return left and right

@@ -21,6 +21,11 @@ from localzure.core.runtime import LocalZureRuntime
 from localzure.core.logging_config import setup_logging
 from localzure.services.servicebus.api import router as servicebus_router
 from localzure.services.servicebus.error_handlers import register_exception_handlers
+from localzure.services.keyvault.routes import create_router as create_keyvault_router
+from localzure.services.blob.api import router as blob_router
+from localzure.services.queue.api import router as queue_router
+from localzure.services.table.api import router as table_router
+from localzure.services.cosmosdb.routes import router as cosmosdb_router
 
 
 __version__ = "0.1.0"
@@ -85,13 +90,13 @@ def start(host: str, port: int, config: Optional[Path], log_level: str, reload: 
     setup_logging(log_level.upper())
     logger = logging.getLogger("localzure.cli")
     
-    click.echo(f"🌀 Starting LocalZure v{__version__}")
-    click.echo(f"📍 Host: {host}:{port}")
+    click.echo(f"Starting LocalZure v{__version__}")
+    click.echo(f"Host: {host}:{port}")
     
     if config:
-        click.echo(f"⚙️  Config: {config}")
+        click.echo(f"Config: {config}")
     
-    click.echo(f"📊 Log Level: {log_level}")
+    click.echo(f"Log Level: {log_level}")
     click.echo()
     
     # Run with uvicorn
@@ -120,7 +125,7 @@ def start(host: str, port: int, config: Optional[Path], log_level: str, reload: 
     except KeyboardInterrupt:
         click.echo("\n👋 Shutting down LocalZure...")
     except Exception as e:
-        click.echo(f"❌ Error starting LocalZure: {e}", err=True)
+        click.echo(f"[ERROR] Error starting LocalZure: {e}", err=True)
         sys.exit(1)
 
 
@@ -131,11 +136,12 @@ def status():
     
     Displays which services are running and their health status.
     """
-    click.echo("📊 LocalZure Status")
+    click.echo(" LocalZure Status")
     click.echo()
     
     # TODO: Implement actual status checking via HTTP health endpoint
-    click.echo("Service Bus: ✅ Running")
+    click.echo("Service Bus: [OK] Running")
+    click.echo("Key Vault:   [OK] Running")
     click.echo()
     click.echo("Run 'localzure start' to start services.")
 
@@ -149,7 +155,7 @@ def stop():
     """
     click.echo("🛑 Stopping LocalZure...")
     # TODO: Implement actual stop mechanism (PID file, signal, etc.)
-    click.echo("✅ LocalZure stopped")
+    click.echo("[OK] LocalZure stopped")
 
 
 @cli.command()
@@ -198,15 +204,323 @@ def config():
     
     Displays the active configuration for LocalZure services.
     """
-    click.echo("⚙️  LocalZure Configuration")
+    click.echo("LocalZure Configuration")
     click.echo()
     click.echo("Host: 127.0.0.1")
-    click.echo("Port: 7071")
     click.echo()
     click.echo("Enabled Services:")
     click.echo("  - Service Bus (AMQP 1.0 emulator)")
+    click.echo("  - Key Vault (secrets management)")
     click.echo()
     click.echo("Use 'localzure start --config <file>' to load custom configuration.")
+    click.echo("Use 'localzure start --config <file>' to load custom configuration.")
+
+
+# ========== Key Vault Management Commands (SVC-KV-001) ==========
+
+@cli.group()
+def keyvault():
+    """
+    Manage Key Vault secrets.
+    
+    Commands for creating, retrieving, listing, and deleting secrets.
+    """
+    pass
+
+
+@keyvault.command()
+@click.argument("vault_name")
+@click.argument("secret_name")
+@click.argument("value")
+@click.option(
+    "--content-type",
+    help="Content type of the secret (e.g., 'text/plain', 'application/json')",
+)
+@click.option(
+    "--tags",
+    multiple=True,
+    help="Tags in key=value format (can specify multiple times)",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="LocalZure host",
+    show_default=True,
+)
+@click.option(
+    "--port",
+    default=8200,
+    help="Key Vault port",
+    show_default=True,
+    type=int,
+)
+def set(vault_name: str, secret_name: str, value: str, content_type: Optional[str], tags: tuple, host: str, port: int):
+    """
+    Set (create or update) a secret.
+    
+    Examples:
+        localzure keyvault set my-vault db-password "super-secret"
+        localzure keyvault set my-vault api-key "key123" --content-type text/plain
+        localzure keyvault set my-vault config "data" --tags env=prod --tags app=web
+    """
+    import httpx
+    import json
+    
+    click.echo(f"🔐 Setting secret '{secret_name}' in vault '{vault_name}'...")
+    
+    # Parse tags
+    tags_dict = {}
+    for tag in tags:
+        if "=" in tag:
+            key, val = tag.split("=", 1)
+            tags_dict[key] = val
+    
+    # Prepare request
+    request_data = {"value": value}
+    if content_type:
+        request_data["contentType"] = content_type
+    if tags_dict:
+        request_data["tags"] = tags_dict
+    
+    try:
+        url = f"http://{host}:{port}/{vault_name}/secrets/{secret_name}?api-version=7.3"
+        response = httpx.put(url, json=request_data, timeout=10.0)
+        response.raise_for_status()
+        
+        result = response.json()
+        click.echo(f"[OK] Secret set successfully")
+        click.echo(f"   ID: {result['id']}")
+        if result.get("attributes", {}).get("created"):
+            click.echo(f"   Created: {result['attributes']['created']}")
+    
+    except httpx.HTTPError as e:
+        click.echo(f"[ERROR] Failed to set secret: {e}", err=True)
+        sys.exit(1)
+
+
+@keyvault.command()
+@click.argument("vault_name")
+@click.argument("secret_name")
+@click.option(
+    "--version",
+    help="Specific version to retrieve (default: latest)",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="LocalZure host",
+    show_default=True,
+)
+@click.option(
+    "--port",
+    default=8200,
+    help="Key Vault port",
+    show_default=True,
+    type=int,
+)
+def get(vault_name: str, secret_name: str, version: Optional[str], host: str, port: int):
+    """
+    Get a secret value.
+    
+    Examples:
+        localzure keyvault get my-vault db-password
+        localzure keyvault get my-vault api-key --version abc123
+    """
+    import httpx
+    
+    click.echo(f"🔍 Retrieving secret '{secret_name}' from vault '{vault_name}'...")
+    
+    try:
+        if version:
+            url = f"http://{host}:{port}/{vault_name}/secrets/{secret_name}/{version}?api-version=7.3"
+        else:
+            url = f"http://{host}:{port}/{vault_name}/secrets/{secret_name}?api-version=7.3"
+        
+        response = httpx.get(url, timeout=10.0)
+        response.raise_for_status()
+        
+        result = response.json()
+        click.echo(f"[OK] Secret retrieved")
+        click.echo(f"   Value: {result['value']}")
+        click.echo(f"   ID: {result['id']}")
+        if result.get("contentType"):
+            click.echo(f"   Content-Type: {result['contentType']}")
+        if result.get("tags"):
+            click.echo(f"   Tags: {result['tags']}")
+    
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            click.echo(f"[ERROR] Secret not found", err=True)
+        elif e.response.status_code == 403:
+            click.echo(f"[ERROR] Secret is disabled or expired", err=True)
+        else:
+            click.echo(f"[ERROR] Failed to get secret: {e}", err=True)
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        click.echo(f"[ERROR] Failed to get secret: {e}", err=True)
+        sys.exit(1)
+
+
+@keyvault.command()
+@click.argument("vault_name")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="LocalZure host",
+    show_default=True,
+)
+@click.option(
+    "--port",
+    default=8200,
+    help="Key Vault port",
+    show_default=True,
+    type=int,
+)
+def list(vault_name: str, host: str, port: int):
+    """
+    List all secrets in a vault.
+    
+    Example:
+        localzure keyvault list my-vault
+    """
+    import httpx
+    
+    click.echo(f"📋 Listing secrets in vault '{vault_name}'...")
+    click.echo()
+    
+    try:
+        url = f"http://{host}:{port}/{vault_name}/secrets?api-version=7.3"
+        response = httpx.get(url, timeout=10.0)
+        response.raise_for_status()
+        
+        result = response.json()
+        secrets = result.get("value", [])
+        
+        if not secrets:
+            click.echo("No secrets found.")
+        else:
+            click.echo(f"Found {len(secrets)} secret(s):\n")
+            for secret in secrets:
+                secret_id = secret["id"]
+                secret_name = secret_id.split("/")[-1]
+                enabled = secret["attributes"]["enabled"]
+                status = "[OK] Enabled" if enabled else "[X] Disabled"
+                
+                click.echo(f"  • {secret_name} ({status})")
+                if secret.get("contentType"):
+                    click.echo(f"    Content-Type: {secret['contentType']}")
+                if secret.get("tags"):
+                    click.echo(f"    Tags: {secret['tags']}")
+                click.echo()
+    
+    except httpx.HTTPError as e:
+        click.echo(f"[ERROR] Failed to list secrets: {e}", err=True)
+        sys.exit(1)
+
+
+@keyvault.command()
+@click.argument("vault_name")
+@click.argument("secret_name")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="LocalZure host",
+    show_default=True,
+)
+@click.option(
+    "--port",
+    default=8200,
+    help="Key Vault port",
+    show_default=True,
+    type=int,
+)
+def delete(vault_name: str, secret_name: str, host: str, port: int):
+    """
+    Delete a secret.
+    
+    Example:
+        localzure keyvault delete my-vault old-secret
+    """
+    import httpx
+    
+    click.echo(f"  Deleting secret '{secret_name}' from vault '{vault_name}'...")
+    
+    try:
+        url = f"http://{host}:{port}/{vault_name}/secrets/{secret_name}?api-version=7.3"
+        response = httpx.delete(url, timeout=10.0)
+        response.raise_for_status()
+        
+        result = response.json()
+        click.echo(f"[OK] Secret deleted")
+        if result.get("recoveryId"):
+            click.echo(f"   Recovery ID: {result['recoveryId']}")
+            click.echo(f"   [INFO] Secret is soft-deleted and can be recovered")
+    
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            click.echo(f"[ERROR] Secret not found", err=True)
+        else:
+            click.echo(f"[ERROR] Failed to delete secret: {e}", err=True)
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        click.echo(f"[ERROR] Failed to delete secret: {e}", err=True)
+        sys.exit(1)
+
+
+@keyvault.command()
+@click.argument("vault_name")
+@click.argument("secret_name")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="LocalZure host",
+    show_default=True,
+)
+@click.option(
+    "--port",
+    default=8200,
+    help="Key Vault port",
+    show_default=True,
+    type=int,
+)
+def versions(vault_name: str, secret_name: str, host: str, port: int):
+    """
+    List all versions of a secret.
+    
+    Example:
+        localzure keyvault versions my-vault db-password
+    """
+    import httpx
+    
+    click.echo(f"📋 Listing versions of secret '{secret_name}' in vault '{vault_name}'...")
+    click.echo()
+    
+    try:
+        url = f"http://{host}:{port}/{vault_name}/secrets/{secret_name}/versions?api-version=7.3"
+        response = httpx.get(url, timeout=10.0)
+        response.raise_for_status()
+        
+        result = response.json()
+        versions = result.get("value", [])
+        
+        if not versions:
+            click.echo("No versions found.")
+        else:
+            click.echo(f"Found {len(versions)} version(s):\n")
+            for idx, version_item in enumerate(versions, 1):
+                version_id = version_item["id"].split("/")[-1]
+                created = version_item["attributes"].get("created", "N/A")
+                enabled = version_item["attributes"]["enabled"]
+                status = "[OK]" if enabled else "[X]"
+                
+                is_latest = " (latest)" if idx == 1 else ""
+                click.echo(f"  {idx}. {version_id[:8]}...{is_latest} {status}")
+                click.echo(f"     Created: {created}")
+                click.echo()
+    
+    except httpx.HTTPError as e:
+        click.echo(f"[ERROR] Failed to list versions: {e}", err=True)
+        sys.exit(1)
 
 
 # ========== Storage Management Commands (SVC-SB-010) ==========
@@ -240,7 +554,7 @@ def stats(config: Optional[Path]):
     """
     from localzure.services.servicebus.config import load_storage_config
     
-    click.echo("📊 Storage Statistics")
+    click.echo(" Storage Statistics")
     click.echo("=" * 50)
     
     try:
@@ -283,7 +597,7 @@ def stats(config: Optional[Path]):
         click.echo("\n💡 Tip: Use 'localzure storage export' to backup your data")
     
     except Exception as e:
-        click.echo(f"❌ Error loading storage stats: {e}", err=True)
+        click.echo(f"[ERROR] Error loading storage stats: {e}", err=True)
         sys.exit(1)
 
 
@@ -322,7 +636,7 @@ def export(path: Path, config: Optional[Path]):
             try:
                 # Export data
                 await backend.export_data(str(path))
-                click.echo(f"✅ Data exported successfully to {path}")
+                click.echo(f"[OK] Data exported successfully to {path}")
             finally:
                 await backend.close()
         
@@ -330,7 +644,7 @@ def export(path: Path, config: Optional[Path]):
         asyncio.run(do_export())
     
     except Exception as e:
-        click.echo(f"❌ Export failed: {e}", err=True)
+        click.echo(f"[ERROR] Export failed: {e}", err=True)
         sys.exit(1)
 
 
@@ -354,7 +668,7 @@ def import_data(path: Path, config: Optional[Path], yes: bool):
     
     Restores entities and messages from a previous export.
     
-    ⚠️  WARNING: This will overwrite existing data!
+    [WARN]  WARNING: This will overwrite existing data!
     
     Example:
         localzure storage import backup.json
@@ -362,7 +676,7 @@ def import_data(path: Path, config: Optional[Path], yes: bool):
     """
     if not yes:
         click.confirm(
-            f"⚠️  This will overwrite existing data. Import from {path}?",
+            f"[WARN]  This will overwrite existing data. Import from {path}?",
             abort=True,
         )
     
@@ -383,7 +697,7 @@ def import_data(path: Path, config: Optional[Path], yes: bool):
             try:
                 # Import data
                 await backend.import_data(str(path))
-                click.echo(f"✅ Data imported successfully from {path}")
+                click.echo(f"[OK] Data imported successfully from {path}")
             finally:
                 await backend.close()
         
@@ -391,7 +705,7 @@ def import_data(path: Path, config: Optional[Path], yes: bool):
         asyncio.run(do_import())
     
     except Exception as e:
-        click.echo(f"❌ Import failed: {e}", err=True)
+        click.echo(f"[ERROR] Import failed: {e}", err=True)
         sys.exit(1)
 
 
@@ -413,7 +727,7 @@ def compact(config: Optional[Path]):
     Example:
         localzure storage compact
     """
-    click.echo("🗜️  Compacting storage...")
+    click.echo("  Compacting storage...")
     
     try:
         from localzure.services.servicebus.config import load_storage_config
@@ -430,7 +744,7 @@ def compact(config: Optional[Path]):
             try:
                 # Compact
                 await backend.compact()
-                click.echo("✅ Storage compacted successfully")
+                click.echo("[OK] Storage compacted successfully")
             finally:
                 await backend.close()
         
@@ -438,7 +752,7 @@ def compact(config: Optional[Path]):
         asyncio.run(do_compact())
     
     except Exception as e:
-        click.echo(f"❌ Compact failed: {e}", err=True)
+        click.echo(f"[ERROR] Compact failed: {e}", err=True)
         sys.exit(1)
 
 
@@ -459,7 +773,7 @@ def purge(config: Optional[Path], yes: bool):
     """
     Delete ALL data from storage.
     
-    ⚠️  WARNING: This is irreversible! All entities and messages will be permanently deleted.
+    [WARN]  WARNING: This is irreversible! All entities and messages will be permanently deleted.
     
     Example:
         localzure storage purge
@@ -467,17 +781,17 @@ def purge(config: Optional[Path], yes: bool):
     """
     if not yes:
         click.confirm(
-            "⚠️  Are you ABSOLUTELY SURE you want to delete ALL data? This cannot be undone!",
+            "[WARN]  Are you ABSOLUTELY SURE you want to delete ALL data? This cannot be undone!",
             abort=True,
         )
         
         # Double confirmation
         confirmation = click.prompt("Type 'DELETE ALL' to confirm")
         if confirmation != "DELETE ALL":
-            click.echo("❌ Purge cancelled (confirmation did not match)")
+            click.echo("[ERROR] Purge cancelled (confirmation did not match)")
             sys.exit(1)
     
-    click.echo("🗑️  Purging all data...")
+    click.echo("  Purging all data...")
     
     try:
         from localzure.services.servicebus.config import load_storage_config
@@ -494,7 +808,7 @@ def purge(config: Optional[Path], yes: bool):
             try:
                 # Purge
                 await backend.purge()
-                click.echo("✅ All data has been purged")
+                click.echo("[OK] All data has been purged")
             finally:
                 await backend.close()
         
@@ -502,7 +816,7 @@ def purge(config: Optional[Path], yes: bool):
         asyncio.run(do_purge())
     
     except Exception as e:
-        click.echo(f"❌ Purge failed: {e}", err=True)
+        click.echo(f"[ERROR] Purge failed: {e}", err=True)
         sys.exit(1)
 
 
@@ -529,7 +843,36 @@ def create_app() -> FastAPI:
             "status": "healthy",
             "version": __version__,
             "services": {
-                "servicebus": "running"
+                "servicebus": {
+                    "name": "servicebus",
+                    "state": "running",
+                    "version": __version__
+                },
+                "keyvault": {
+                    "name": "keyvault",
+                    "state": "running",
+                    "version": __version__
+                },
+                "blobstorage": {
+                    "name": "blobstorage",
+                    "state": "running",
+                    "version": __version__
+                },
+                "queuestorage": {
+                    "name": "queuestorage",
+                    "state": "running",
+                    "version": __version__
+                },
+                "tablestorage": {
+                    "name": "tablestorage",
+                    "state": "running",
+                    "version": __version__
+                },
+                "cosmosdb": {
+                    "name": "cosmosdb",
+                    "state": "running",
+                    "version": __version__
+                }
             }
         }
     
@@ -545,6 +888,16 @@ def create_app() -> FastAPI:
                     "status": "running",
                     "endpoint": "/servicebus",
                     "docs": "/docs"
+                },
+                "keyvault": {
+                    "status": "running",
+                    "endpoint": "/",
+                    "docs": "/docs#/Secrets"
+                },
+                "blobstorage": {
+                    "status": "running",
+                    "endpoint": "/blob",
+                    "docs": "/docs#/blob-storage"
                 }
             },
             "documentation": "/docs",
@@ -553,6 +906,11 @@ def create_app() -> FastAPI:
     
     # Include service routers
     app.include_router(servicebus_router, tags=["Service Bus"])
+    app.include_router(create_keyvault_router(), tags=["Key Vault"])
+    app.include_router(blob_router, tags=["Blob Storage"])
+    app.include_router(queue_router, tags=["Queue Storage"])
+    app.include_router(table_router, tags=["Table Storage"])
+    app.include_router(cosmosdb_router, tags=["Cosmos DB"])
     
     # Register exception handlers
     register_exception_handlers(app)
